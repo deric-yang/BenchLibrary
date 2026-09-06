@@ -249,12 +249,9 @@ def _redact_strong_credentials(payload: bytes) -> tuple[bytes, int]:
 
 
 def _text_line_count(payload: bytes, relative_path: str) -> int:
-    """Count logical UTF-8 text lines with stable empty and trailing-newline semantics."""
-    try:
-        text = payload.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ExportError(f"Text preview chunk is not valid UTF-8: {relative_path}") from exc
-    return len(text.splitlines()) if text else 0
+    """Count byte-preserving text lines without rejecting legacy source encodings."""
+    del relative_path
+    return len(payload.splitlines()) if payload else 0
 
 
 def _is_text_preview_chunk_path(relative_path: str) -> bool:

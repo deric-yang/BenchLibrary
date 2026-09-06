@@ -398,10 +398,11 @@ class PublicReleaseExporterTest(unittest.TestCase):
         self.assertGreaterEqual(release_manifest["totals"]["redactions"], 4)
 
     def test_text_preview_line_count_has_stable_newline_semantics(self) -> None:
-        """Empty, trailing-newline, and CRLF chunks retain deterministic line counts."""
+        """Empty, CRLF, and legacy-encoded chunks retain deterministic line counts."""
         self.assertEqual(_text_line_count(b"", "empty.txt"), 0)
         self.assertEqual(_text_line_count(b"one\n", "trailing.txt"), 1)
         self.assertEqual(_text_line_count(b"one\r\ntwo\r\n", "crlf.txt"), 2)
+        self.assertEqual(_text_line_count(b"caf\xe9\r\nnext\r\n", "latin-1.txt"), 2)
 
     def test_rejects_credential_spanning_adjacent_text_chunks(self) -> None:
         """Manifest-ordered overlap scanning catches a JWT split across two files."""
