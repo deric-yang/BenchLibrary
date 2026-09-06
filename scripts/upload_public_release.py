@@ -28,7 +28,7 @@ else:
     from verify_r2_release import VerificationError, verify_release
 
 
-DIRECT_LIMIT = 80 * 1024 * 1024
+DIRECT_LIMIT = 32 * 1024 * 1024
 PART_SIZE = 16 * 1024 * 1024
 MAX_ATTEMPTS = 6
 MAX_INVENTORY_PAGES = 100000
@@ -59,8 +59,108 @@ class ReleaseManifest:
     files: tuple[ReleaseFile, ...]
 
 
+@dataclass(frozen=True)
+class MultipartState:
+    """Persist enough immutable R2 multipart state to resume after interruption."""
+
+    sha256: str
+    size: int
+    part_size: int
+    metadata_sha256: str
+    upload_id: str
+    parts: tuple[tuple[int, str], ...]
+
+
 class UploadFailure(RuntimeError):
     """A bounded upload operation could not be completed."""
+
+
+class MultipartUploadMissing(UploadFailure):
+    """The R2 multipart upload expired or no longer exists."""
+
+
+def _valid_sha256(value: object) -> bool:
+    """Return whether a value is one lowercase hexadecimal SHA-256 digest."""
+    return isinstance(value, str) and bool(re.fullmatch(r"[a-f0-9]{64}", value))
+
+
+def _valid_upload_id(value: object) -> bool:
+    """Return whether an opaque R2 upload identifier is header-safe."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 512
+        and all(" " <= character <= "~" for character in value)
+    )
+
+
+def _valid_etag(value: object) -> bool:
+    """Return whether an opaque R2 part ETag is safe to persist and resend."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 512
+        and all(" " <= character <= "~" for character in value)
+    )
+
+
+def _metadata_sha256(item: ReleaseFile) -> str:
+    """Hash every target HTTP metadata field that is fixed at multipart init."""
+    serialized = json.dumps(
+        [
+            item.content_type,
+            item.cache_control,
+            item.content_encoding,
+            item.content_disposition,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _multipart_state_from_record(
+    payload: dict[str, Any],
+    line_number: int,
+    state_path: pathlib.Path,
+) -> MultipartState:
+    """Parse one fail-closed multipart checkpoint from an append-only state file."""
+    size = payload.get("size")
+    part_size = payload.get("part_size")
+    upload_id = payload.get("upload_id")
+    metadata_sha256 = payload.get("metadata_sha256", "")
+    raw_parts = payload.get("parts")
+    invalid = (
+        isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 1
+        or isinstance(part_size, bool)
+        or not isinstance(part_size, int)
+        or part_size < 1
+        or not _valid_upload_id(upload_id)
+        or (metadata_sha256 != "" and not _valid_sha256(metadata_sha256))
+        or not isinstance(raw_parts, list)
+    )
+    if invalid:
+        raise UploadFailure(f"Invalid upload state line {line_number}: {state_path}")
+    expected_parts = (size + part_size - 1) // part_size
+    if expected_parts < 1 or expected_parts > 10000 or len(raw_parts) > expected_parts:
+        raise UploadFailure(f"Invalid upload state line {line_number}: {state_path}")
+    parts: list[tuple[int, str]] = []
+    for expected_number, part in enumerate(raw_parts, start=1):
+        if (
+            not isinstance(part, dict)
+            or part.get("partNumber") != expected_number
+            or not _valid_etag(part.get("etag"))
+        ):
+            raise UploadFailure(f"Invalid upload state line {line_number}: {state_path}")
+        parts.append((expected_number, part["etag"]))
+    return MultipartState(
+        sha256=str(payload["sha256"]).lower(),
+        size=size,
+        part_size=part_size,
+        metadata_sha256=metadata_sha256,
+        upload_id=upload_id,
+        parts=tuple(parts),
+    )
 
 
 class PublicReleaseUploader:
@@ -72,15 +172,17 @@ class PublicReleaseUploader:
         token: str,
         proxy: str | None,
         state_path: pathlib.Path,
+        release_prefix: str,
     ) -> None:
         """Initialize authenticated HTTP sessions and resumable local state."""
         self.endpoint = endpoint.rstrip("/")
         self.token = token
         self.proxies = {"http": proxy, "https": proxy} if proxy else None
         self.state_path = state_path
+        self.release_prefix = release_prefix
         self.state_lock = threading.Lock()
         self.thread_local = threading.local()
-        self.completed = self._load_state()
+        self.completed, self.multipart = self._load_state()
 
     def _session(self) -> requests.Session:
         """Return one requests session per upload thread."""
@@ -91,11 +193,12 @@ class PublicReleaseUploader:
             self.thread_local.session = session
         return session
 
-    def _load_state(self) -> dict[str, str]:
-        """Load append-only completed-object hashes for transfer resumption."""
+    def _load_state(self) -> tuple[dict[str, str], dict[str, MultipartState]]:
+        """Load append-only completed and in-flight multipart transfer state."""
         if not self.state_path.exists():
-            return {}
+            return {}, {}
         completed: dict[str, str] = {}
+        multipart: dict[str, MultipartState] = {}
         with self.state_path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 try:
@@ -106,20 +209,87 @@ class PublicReleaseUploader:
                     ) from error
                 if not isinstance(payload, dict) or not isinstance(payload.get("path"), str):
                     raise UploadFailure(f"Invalid upload state line {line_number}: {self.state_path}")
-                completed[payload["path"]] = str(payload.get("sha256", ""))
-        return completed
+                path = payload["path"]
+                event = payload.get("event", "complete")
+                sha256 = str(payload.get("sha256", "")).lower()
+                if payload.get("prefix") != self.release_prefix or not _valid_sha256(sha256):
+                    raise UploadFailure(f"Invalid upload state line {line_number}: {self.state_path}")
+                if event == "complete":
+                    completed[path] = sha256
+                    multipart.pop(path, None)
+                elif event == "multipart":
+                    multipart[path] = _multipart_state_from_record(payload, line_number, self.state_path)
+                    completed.pop(path, None)
+                elif event == "abort":
+                    multipart.pop(path, None)
+                    completed.pop(path, None)
+                else:
+                    raise UploadFailure(f"Invalid upload state line {line_number}: {self.state_path}")
+        return completed, multipart
+
+    def _append_state(self, payload: dict[str, Any]) -> None:
+        """Durably append one small state transition while uploads run concurrently."""
+        record = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self.state_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{record}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def _save_completed(self, item: ReleaseFile) -> None:
         """Append one successfully persisted object to the resume state."""
         with self.state_lock:
             self.completed[item.path] = item.sha256
-            record = json.dumps(
-                {"path": item.path, "sha256": item.sha256},
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            with self.state_path.open("a", encoding="utf-8") as handle:
-                handle.write(f"{record}\n")
+            self.multipart.pop(item.path, None)
+            self._append_state({
+                "event": "complete",
+                "path": item.path,
+                "prefix": self.release_prefix,
+                "sha256": item.sha256,
+            })
+
+    def _save_multipart(
+        self,
+        item: ReleaseFile,
+        upload_id: str,
+        parts: dict[int, str],
+    ) -> None:
+        """Checkpoint an R2 upload ID and every acknowledged contiguous part."""
+        state = MultipartState(
+            sha256=item.sha256,
+            size=item.size,
+            part_size=PART_SIZE,
+            metadata_sha256=_metadata_sha256(item),
+            upload_id=upload_id,
+            parts=tuple(sorted(parts.items())),
+        )
+        payload = {
+            "event": "multipart",
+            "path": item.path,
+            "prefix": self.release_prefix,
+            "sha256": item.sha256,
+            "size": item.size,
+            "part_size": PART_SIZE,
+            "metadata_sha256": state.metadata_sha256,
+            "upload_id": upload_id,
+            "parts": [
+                {"partNumber": part_number, "etag": etag}
+                for part_number, etag in state.parts
+            ],
+        }
+        with self.state_lock:
+            self.multipart[item.path] = state
+            self._append_state(payload)
+
+    def _clear_multipart(self, item: ReleaseFile) -> None:
+        """Record that an explicitly aborted multipart upload is no longer resumable."""
+        with self.state_lock:
+            self.multipart.pop(item.path, None)
+            self._append_state({
+                "event": "abort",
+                "path": item.path,
+                "prefix": self.release_prefix,
+                "sha256": item.sha256,
+            })
 
     @staticmethod
     def _encoded_key(path: str) -> str:
@@ -132,13 +302,13 @@ class PublicReleaseUploader:
             "X-KWBL-Upload-Key": self.token,
             "X-KWBL-Object-Key": self._encoded_key(item.path),
             "X-KWBL-SHA256": item.sha256,
-            "Content-Type": item.content_type,
-            "Cache-Control": item.cache_control,
+            "X-KWBL-Content-Type": item.content_type,
+            "X-KWBL-Cache-Control": item.cache_control,
         }
         if item.content_encoding:
-            headers["Content-Encoding"] = item.content_encoding
+            headers["X-KWBL-Content-Encoding"] = item.content_encoding
         if item.content_disposition:
-            headers["Content-Disposition"] = item.content_disposition
+            headers["X-KWBL-Content-Disposition"] = item.content_disposition
         return headers
 
     def health(self) -> dict[str, Any]:
@@ -257,6 +427,16 @@ class PublicReleaseUploader:
                         )
                 if response.status_code < 400:
                     return response
+                if response.status_code == 409:
+                    try:
+                        error_payload = response.json()
+                    except ValueError:
+                        error_payload = None
+                    if (
+                        isinstance(error_payload, dict)
+                        and error_payload.get("code") == "multipart_upload_missing"
+                    ):
+                        raise MultipartUploadMissing("R2 multipart upload no longer exists")
                 if response.status_code not in RETRYABLE_STATUS:
                     raise UploadFailure(f"Upload endpoint returned HTTP {response.status_code}")
                 retry_after = response.headers.get("Retry-After")
@@ -274,6 +454,7 @@ class PublicReleaseUploader:
         """Stream one bounded object through the direct upload route."""
         headers = self._headers(item)
         headers["Content-Length"] = str(item.size)
+        headers["Content-Type"] = "application/octet-stream"
         response = self._request_with_retry(
             "PUT",
             f"{self.endpoint}/_kwbl-upload/v1/object",
@@ -284,62 +465,114 @@ class PublicReleaseUploader:
         return "remote-skip" if result.get("skipped") else "uploaded"
 
     def _put_multipart(self, source: pathlib.Path, item: ReleaseFile) -> str:
-        """Upload a large object in fixed-size R2 multipart chunks."""
+        """Restart once if R2 has expired a previously checkpointed upload ID."""
+        for restart_attempt in range(2):
+            try:
+                return self._put_multipart_once(source, item)
+            except MultipartUploadMissing:
+                self._clear_multipart(item)
+                if restart_attempt == 1:
+                    raise
+        raise AssertionError("unreachable multipart restart state")
+
+    def _put_multipart_once(self, source: pathlib.Path, item: ReleaseFile) -> str:
+        """Upload or resume a large object in fixed-size R2 multipart chunks."""
         headers = self._headers(item)
         headers["X-KWBL-Object-Size"] = str(item.size)
-        initialized = self._request_with_retry(
-            "POST",
-            f"{self.endpoint}/_kwbl-upload/v1/multipart/init",
-            headers=headers,
-        ).json()
-        if initialized.get("skipped"):
-            return "remote-skip"
-        upload_id = initialized.get("uploadId")
-        if not isinstance(upload_id, str) or not upload_id:
-            raise UploadFailure("Multipart upload did not return an upload ID")
-
-        parts: list[dict[str, Any]] = []
-        try:
-            with source.open("rb") as stream:
-                part_number = 1
-                while True:
-                    payload = stream.read(PART_SIZE)
-                    if not payload:
-                        break
-                    part_headers = dict(headers)
-                    part_headers["X-KWBL-Upload-Id"] = upload_id
-                    part_headers["X-KWBL-Part-Number"] = str(part_number)
-                    part_headers["Content-Length"] = str(len(payload))
-                    result = self._request_with_retry(
-                        "PUT",
-                        f"{self.endpoint}/_kwbl-upload/v1/multipart/part",
-                        headers=part_headers,
-                        data=payload,
-                    ).json()
-                    parts.append({"partNumber": int(result["partNumber"]), "etag": str(result["etag"])})
-                    part_number += 1
-            complete_headers = dict(headers)
-            complete_headers["X-KWBL-Upload-Id"] = upload_id
-            self._request_with_retry(
+        headers["X-KWBL-Part-Size"] = str(PART_SIZE)
+        expected_parts = (item.size + PART_SIZE - 1) // PART_SIZE
+        if expected_parts < 2 or expected_parts > 10000:
+            raise UploadFailure(f"Invalid multipart part count for {item.path}: {expected_parts}")
+        state = self.multipart.get(item.path)
+        if state is not None and not self._state_matches_item(state, item):
+            self._abort_multipart(item, state.upload_id)
+            state = None
+        if state is None:
+            initialized = self._request_with_retry(
                 "POST",
-                f"{self.endpoint}/_kwbl-upload/v1/multipart/complete",
-                headers=complete_headers,
-                json={"parts": parts},
-            )
-        except Exception:
-            abort_headers = dict(headers)
-            abort_headers["X-KWBL-Upload-Id"] = upload_id
-            try:
-                self._session().post(
-                    f"{self.endpoint}/_kwbl-upload/v1/multipart/abort",
-                    headers=abort_headers,
-                    proxies=self.proxies,
-                    timeout=(15, 30),
-                )
-            except requests.RequestException:
-                pass
-            raise
+                f"{self.endpoint}/_kwbl-upload/v1/multipart/init",
+                headers=headers,
+            ).json()
+            if initialized.get("skipped") is True:
+                return "remote-skip"
+            upload_id = initialized.get("uploadId")
+            if not _valid_upload_id(upload_id):
+                raise UploadFailure("Multipart upload did not return a valid upload ID")
+            parts: dict[int, str] = {}
+            self._save_multipart(item, upload_id, parts)
+        else:
+            upload_id = state.upload_id
+            parts = dict(state.parts)
+
+        for part_number in range(1, expected_parts + 1):
+            if part_number in parts:
+                continue
+            offset = (part_number - 1) * PART_SIZE
+            expected_length = min(PART_SIZE, item.size - offset)
+            with source.open("rb") as stream:
+                stream.seek(offset)
+                payload = stream.read(expected_length)
+            if len(payload) != expected_length:
+                raise UploadFailure(f"Could not read multipart source slice for {item.path}")
+            part_headers = dict(headers)
+            part_headers["X-KWBL-Upload-Id"] = upload_id
+            part_headers["X-KWBL-Part-Number"] = str(part_number)
+            part_headers["Content-Length"] = str(expected_length)
+            part_headers["Content-Type"] = "application/octet-stream"
+            result = self._request_with_retry(
+                "PUT",
+                f"{self.endpoint}/_kwbl-upload/v1/multipart/part",
+                headers=part_headers,
+                data=payload,
+            ).json()
+            returned_number = result.get("partNumber") if isinstance(result, dict) else None
+            etag = result.get("etag") if isinstance(result, dict) else None
+            if returned_number != part_number or not _valid_etag(etag):
+                raise UploadFailure("Multipart part endpoint returned an invalid descriptor")
+            parts[part_number] = etag
+            self._save_multipart(item, upload_id, parts)
+
+        descriptors = [
+            {"partNumber": part_number, "etag": parts[part_number]}
+            for part_number in range(1, expected_parts + 1)
+        ]
+        complete_headers = dict(headers)
+        complete_headers["X-KWBL-Upload-Id"] = upload_id
+        result = self._request_with_retry(
+            "POST",
+            f"{self.endpoint}/_kwbl-upload/v1/multipart/complete",
+            headers=complete_headers,
+            json={"parts": descriptors},
+        ).json()
+        if (
+            not isinstance(result, dict)
+            or result.get("ok") is not True
+            or result.get("size") != item.size
+            or result.get("sha256") != item.sha256
+        ):
+            raise UploadFailure("Multipart completion did not verify the final R2 object")
         return "uploaded"
+
+    @staticmethod
+    def _state_matches_item(state: MultipartState, item: ReleaseFile) -> bool:
+        """Return whether a checkpoint describes the exact current immutable upload."""
+        return (
+            state.sha256 == item.sha256
+            and state.size == item.size
+            and state.part_size == PART_SIZE
+            and state.metadata_sha256 == _metadata_sha256(item)
+        )
+
+    def _abort_multipart(self, item: ReleaseFile, upload_id: str) -> None:
+        """Abort only an explicitly stale checkpoint before starting a replacement."""
+        headers = self._headers(item)
+        headers["X-KWBL-Upload-Id"] = upload_id
+        self._request_with_retry(
+            "POST",
+            f"{self.endpoint}/_kwbl-upload/v1/multipart/abort",
+            headers=headers,
+        )
+        self._clear_multipart(item)
 
 
 def safe_source_path(root: pathlib.Path, item: ReleaseFile) -> pathlib.Path:
@@ -587,6 +820,7 @@ def main() -> int:
         token=token,
         proxy=args.proxy,
         state_path=state_path,
+        release_prefix=manifest.prefix,
     )
     health = uploader.health()
     validate_uploader_prefix(health, manifest)

@@ -1,7 +1,15 @@
 const AUTH_HEADER = "X-KWBL-Upload-Key";
 const KEY_HEADER = "X-KWBL-Object-Key";
 const SHA_HEADER = "X-KWBL-SHA256";
-const MAX_DIRECT_BYTES = 80 * 1024 * 1024;
+const CONTENT_TYPE_HEADER = "X-KWBL-Content-Type";
+const CACHE_CONTROL_HEADER = "X-KWBL-Cache-Control";
+const CONTENT_ENCODING_HEADER = "X-KWBL-Content-Encoding";
+const CONTENT_DISPOSITION_HEADER = "X-KWBL-Content-Disposition";
+const MAX_DIRECT_BYTES = 32 * 1024 * 1024;
+const MIN_PART_BYTES = 5 * 1024 * 1024;
+const MAX_PART_BYTES = 32 * 1024 * 1024;
+const MAX_MULTIPART_PARTS = 10000;
+const MAX_COMPLETION_BYTES = 8 * 1024 * 1024;
 const INVENTORY_PAGE_SIZE = 1000;
 
 export default {
@@ -48,15 +56,20 @@ export default {
     catch (error) {
       const status = error instanceof ClientError ? error.status : 500;
       const message = status >= 500 ? "Upload operation failed" : error.message;
-      return json({ ok: false, error: message }, status);
+      const payload = { ok: false, error: message };
+      if (error instanceof ClientError && error.code) {
+        payload.code = error.code;
+      }
+      return json(payload, status);
     }
   },
 };
 
 class ClientError extends Error {
-  constructor(status, message) {
+  constructor(status, message, code = "") {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -171,10 +184,12 @@ function metadataFrom(request) {
   if (!/^[a-f0-9]{64}$/i.test(sha256)) {
     throw new ClientError(400, "Missing or invalid SHA-256");
   }
-  const contentType = sanitizeMetadataValue(request.headers.get("Content-Type"), 200) || "application/octet-stream";
-  const cacheControl = sanitizeMetadataValue(request.headers.get("Cache-Control"), 200) || "public, max-age=3600";
-  const contentEncoding = sanitizeMetadataValue(request.headers.get("Content-Encoding"), 100);
-  const contentDisposition = sanitizeMetadataValue(request.headers.get("Content-Disposition"), 500);
+  const contentType = sanitizeMetadataValue(request.headers.get(CONTENT_TYPE_HEADER), 200)
+    || "application/octet-stream";
+  const cacheControl = sanitizeMetadataValue(request.headers.get(CACHE_CONTROL_HEADER), 200)
+    || "public, max-age=3600";
+  const contentEncoding = sanitizeMetadataValue(request.headers.get(CONTENT_ENCODING_HEADER), 100);
+  const contentDisposition = sanitizeMetadataValue(request.headers.get(CONTENT_DISPOSITION_HEADER), 500);
   const httpMetadata = { contentType, cacheControl };
   if (contentEncoding) {
     httpMetadata.contentEncoding = contentEncoding;
@@ -208,7 +223,7 @@ async function putObject(request, bucket, objectKey) {
   }
   const metadata = metadataFrom(request);
   const existing = await bucket.head(objectKey);
-  if (existing && existing.size === length && existing.customMetadata?.sha256 === metadata.sha256) {
+  if (storedObjectMatches(existing, length, metadata)) {
     return json({ ok: true, skipped: true, size: existing.size, etag: existing.httpEtag });
   }
   const body = length === 0 ? new Uint8Array(0) : request.body;
@@ -224,12 +239,9 @@ async function putObject(request, bucket, objectKey) {
 
 async function initializeMultipart(request, bucket, objectKey) {
   const metadata = metadataFrom(request);
-  const expectedSize = Number(request.headers.get("X-KWBL-Object-Size"));
-  if (!Number.isSafeInteger(expectedSize) || expectedSize <= MAX_DIRECT_BYTES) {
-    throw new ClientError(400, "Invalid multipart object size");
-  }
+  const { expectedSize } = multipartLayoutFrom(request);
   const existing = await bucket.head(objectKey);
-  if (existing && existing.size === expectedSize && existing.customMetadata?.sha256 === metadata.sha256) {
+  if (storedObjectMatches(existing, expectedSize, metadata)) {
     return json({ ok: true, skipped: true, size: existing.size, etag: existing.httpEtag });
   }
   const upload = await bucket.createMultipartUpload(objectKey, metadata.options);
@@ -238,46 +250,151 @@ async function initializeMultipart(request, bucket, objectKey) {
 
 function resumeMultipart(request, bucket, objectKey) {
   const uploadId = request.headers.get("X-KWBL-Upload-Id");
-  if (!uploadId || uploadId.length > 512 || /[\r\n\0]/.test(uploadId)) {
+  if (!uploadId || uploadId.length > 512 || !/^[\x20-\x7e]+$/.test(uploadId)) {
     throw new ClientError(400, "Missing or invalid upload ID");
   }
   return bucket.resumeMultipartUpload(objectKey, uploadId);
 }
 
 async function uploadPart(request, bucket, objectKey) {
-  const upload = resumeMultipart(request, bucket, objectKey);
+  const { expectedParts, expectedSize, partSize } = multipartLayoutFrom(request);
   const partNumber = Number(request.headers.get("X-KWBL-Part-Number"));
   const length = Number(request.headers.get("Content-Length"));
-  if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10000) {
+  if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > expectedParts) {
     throw new ClientError(400, "Invalid part number");
   }
-  if (!Number.isSafeInteger(length) || length < 1 || length > MAX_DIRECT_BYTES) {
-    throw new ClientError(413, "Invalid part size");
+  const expectedLength = partNumber === expectedParts
+    ? expectedSize - partSize * (expectedParts - 1)
+    : partSize;
+  if (length !== expectedLength) {
+    throw new ClientError(400, "Multipart part length does not match its declared layout");
   }
-  const part = await upload.uploadPart(partNumber, request.body);
+  let part;
+  try {
+    const upload = resumeMultipart(request, bucket, objectKey);
+    part = await upload.uploadPart(partNumber, request.body);
+  }
+  catch (error) {
+    if (isMissingMultipartUpload(error)) {
+      throw new ClientError(409, "Multipart upload no longer exists", "multipart_upload_missing");
+    }
+    throw error;
+  }
+  if (part?.partNumber !== partNumber || !validEtag(part?.etag)) {
+    throw new Error("R2 returned an invalid uploaded-part descriptor");
+  }
   return json({ ok: true, partNumber: part.partNumber, etag: part.etag });
 }
 
 async function completeMultipart(request, bucket, objectKey) {
-  const upload = resumeMultipart(request, bucket, objectKey);
-  const payload = await request.json();
+  const metadata = metadataFrom(request);
+  const { expectedParts, expectedSize } = multipartLayoutFrom(request);
+  const payload = await multipartCompletionPayload(request);
   const parts = Array.isArray(payload?.parts) ? payload.parts : [];
-  if (!parts.length || parts.length > 10000) {
+  if (parts.length !== expectedParts) {
     throw new ClientError(400, "Invalid multipart completion payload");
   }
-  for (const part of parts) {
-    if (!Number.isInteger(part?.partNumber) || part.partNumber < 1 || typeof part?.etag !== "string") {
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part?.partNumber !== index + 1 || !validEtag(part?.etag)) {
       throw new ClientError(400, "Invalid multipart part descriptor");
     }
   }
-  const stored = await upload.complete(parts);
-  return json({ ok: true, size: stored.size, etag: stored.httpEtag });
+  let recovered = false;
+  try {
+    const upload = resumeMultipart(request, bucket, objectKey);
+    await upload.complete(parts);
+  }
+  catch (error) {
+    const existing = await bucket.head(objectKey);
+    if (!storedObjectMatches(existing, expectedSize, metadata)) {
+      if (isMissingMultipartUpload(error)) {
+        throw new ClientError(409, "Multipart upload no longer exists", "multipart_upload_missing");
+      }
+      throw error;
+    }
+    recovered = true;
+  }
+  const stored = await bucket.head(objectKey);
+  if (!storedObjectMatches(stored, expectedSize, metadata)) {
+    throw new Error("R2 multipart completion failed its final metadata verification");
+  }
+  return json({
+    ok: true,
+    size: stored.size,
+    etag: stored.httpEtag,
+    sha256: metadata.sha256,
+    recovered,
+  });
 }
 
 async function abortMultipart(request, bucket, objectKey) {
-  const upload = resumeMultipart(request, bucket, objectKey);
-  await upload.abort();
-  return json({ ok: true });
+  try {
+    const upload = resumeMultipart(request, bucket, objectKey);
+    await upload.abort();
+    return json({ ok: true, alreadyMissing: false });
+  }
+  catch (error) {
+    if (isMissingMultipartUpload(error)) {
+      return json({ ok: true, alreadyMissing: true });
+    }
+    throw error;
+  }
+}
+
+function multipartLayoutFrom(request) {
+  const expectedSize = Number(request.headers.get("X-KWBL-Object-Size"));
+  const partSize = Number(request.headers.get("X-KWBL-Part-Size"));
+  if (!Number.isSafeInteger(expectedSize) || expectedSize <= MAX_DIRECT_BYTES) {
+    throw new ClientError(400, "Invalid multipart object size");
+  }
+  if (!Number.isSafeInteger(partSize) || partSize < MIN_PART_BYTES || partSize > MAX_PART_BYTES) {
+    throw new ClientError(400, "Invalid multipart part size");
+  }
+  const expectedParts = Math.ceil(expectedSize / partSize);
+  if (expectedParts < 2 || expectedParts > MAX_MULTIPART_PARTS) {
+    throw new ClientError(400, "Invalid multipart part count");
+  }
+  return { expectedParts, expectedSize, partSize };
+}
+
+function validEtag(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 && /^[\x20-\x7e]+$/.test(value);
+}
+
+function isMissingMultipartUpload(error) {
+  const code = error && typeof error === "object" ? error.code : undefined;
+  const name = error && typeof error === "object" ? error.name : undefined;
+  const message = error instanceof Error ? error.message : String(error || "");
+  return code === 10024
+    || code === "10024"
+    || name === "NoSuchUpload"
+    || /(?:^|\D)10024(?:\D|$)/.test(message);
+}
+
+async function multipartCompletionPayload(request) {
+  const length = Number(request.headers.get("Content-Length"));
+  if (!Number.isSafeInteger(length) || length < 2 || length > MAX_COMPLETION_BYTES) {
+    throw new ClientError(413, "Invalid multipart completion body size");
+  }
+  try {
+    return await request.json();
+  }
+  catch {
+    throw new ClientError(400, "Invalid multipart completion JSON");
+  }
+}
+
+function storedObjectMatches(stored, expectedSize, metadata) {
+  if (!stored || stored.size !== expectedSize || stored.customMetadata?.sha256 !== metadata.sha256) {
+    return false;
+  }
+  const actual = stored.httpMetadata || {};
+  const expected = metadata.options.httpMetadata;
+  return actual.contentType === expected.contentType
+    && actual.cacheControl === expected.cacheControl
+    && (actual.contentEncoding || "") === (expected.contentEncoding || "")
+    && (actual.contentDisposition || "") === (expected.contentDisposition || "");
 }
 
 function response(status, body, extraHeaders = {}) {

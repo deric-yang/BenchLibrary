@@ -8,8 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from scripts.upload_public_release import (
+    MultipartUploadMissing,
     PublicReleaseUploader,
     ReleaseFile,
     ReleaseManifest,
@@ -33,6 +35,75 @@ class FakeInventoryUploader(PublicReleaseUploader):
         """Return the fixture page associated with one cursor."""
         self.requested_cursors.append(cursor)
         return self.pages[cursor]
+
+
+class FakeResponse:
+    """Expose the minimal successful response surface used by the uploader."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        """Keep a deterministic JSON response payload."""
+        self.payload = payload
+
+    def json(self) -> dict[str, Any]:
+        """Return the configured response payload."""
+        return self.payload
+
+
+class FakeMultipartUploader(PublicReleaseUploader):
+    """Emulate multipart protocol responses while retaining local resume state."""
+
+    def __init__(
+        self,
+        state_path: Path,
+        fail_part: int | None = None,
+        invalid_complete: bool = False,
+        missing_part_once: int | None = None,
+    ) -> None:
+        """Configure one optional interrupted part or invalid completion response."""
+        super().__init__(
+            "https://upload.invalid",
+            "x" * 64,
+            None,
+            state_path,
+            "releases/test-release/",
+        )
+        self.fail_part = fail_part
+        self.invalid_complete = invalid_complete
+        self.missing_part_once = missing_part_once
+        self.calls: list[dict[str, Any]] = []
+
+    def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
+        """Return deterministic protocol responses without network access."""
+        route = url.rsplit("/", maxsplit=1)[-1]
+        headers = kwargs.get("headers", {})
+        call = {
+            "route": route,
+            "method": method,
+            "part": headers.get("X-KWBL-Part-Number"),
+            "upload_id": headers.get("X-KWBL-Upload-Id"),
+            "json": kwargs.get("json"),
+        }
+        self.calls.append(call)
+        if route == "init":
+            return FakeResponse({"ok": True, "skipped": False, "uploadId": "upload-one"})
+        if route == "part":
+            part_number = int(headers["X-KWBL-Part-Number"])
+            if part_number == self.missing_part_once:
+                self.missing_part_once = None
+                raise MultipartUploadMissing("simulated expired multipart upload")
+            if part_number == self.fail_part:
+                raise UploadFailure("simulated interrupted multipart part")
+            return FakeResponse({"ok": True, "partNumber": part_number, "etag": f"etag-{part_number}"})
+        if route == "complete":
+            sha256 = "0" * 64 if self.invalid_complete else headers["X-KWBL-SHA256"]
+            return FakeResponse({
+                "ok": True,
+                "size": int(headers["X-KWBL-Object-Size"]),
+                "sha256": sha256,
+            })
+        if route == "abort":
+            return FakeResponse({"ok": True})
+        raise AssertionError(f"Unexpected multipart route: {route}")
 
 
 class UploadManifestTest(unittest.TestCase):
@@ -157,14 +228,227 @@ class UploadManifestTest(unittest.TestCase):
             )
             state = root / "state.jsonl"
             state.write_text(
-                json.dumps({"path": item.path, "sha256": expected_hash}) + "\n",
+                json.dumps({
+                    "path": item.path,
+                    "prefix": "releases/test-release/",
+                    "sha256": expected_hash,
+                }) + "\n",
                 encoding="utf-8",
             )
-            uploader = PublicReleaseUploader("https://example.invalid", "x" * 32, None, state)
+            uploader = PublicReleaseUploader(
+                "https://example.invalid",
+                "x" * 32,
+                None,
+                state,
+                "releases/test-release/",
+            )
             payload.write_bytes(b"evil")
 
             with self.assertRaisesRegex(UploadFailure, "SHA-256 mismatch"):
                 uploader.upload(root, item)
+
+    def test_resume_state_is_bound_to_one_release_prefix(self) -> None:
+        """A state file from another immutable release cannot suppress uploads."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state = Path(temporary_directory) / "state.jsonl"
+            state.write_text(
+                json.dumps({
+                    "event": "complete",
+                    "path": "assets/payload.bin",
+                    "prefix": "releases/old-release/",
+                    "sha256": "a" * 64,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(UploadFailure, "Invalid upload state"):
+                PublicReleaseUploader(
+                    "https://example.invalid",
+                    "x" * 32,
+                    None,
+                    state,
+                    "releases/new-release/",
+                )
+
+    def test_object_encoding_metadata_is_not_used_as_request_encoding(self) -> None:
+        """Gzip metadata stays namespaced so multipart JSON and slices are not decoded."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            uploader = PublicReleaseUploader(
+                "https://example.invalid",
+                "x" * 32,
+                None,
+                Path(temporary_directory) / "state.jsonl",
+                "releases/test-release/",
+            )
+            item = ReleaseFile(
+                "assets/archive.json.gz",
+                12,
+                "a" * 64,
+                "application/json",
+                "public, max-age=31536000, immutable",
+                "gzip",
+                "attachment; filename=archive.json.gz",
+            )
+
+            headers = uploader._headers(item)
+
+            self.assertEqual(headers["X-KWBL-Content-Encoding"], "gzip")
+            self.assertEqual(headers["X-KWBL-Content-Type"], "application/json")
+            self.assertNotIn("Content-Encoding", headers)
+            self.assertNotIn("Content-Type", headers)
+
+    def test_multipart_interruption_resumes_only_missing_parts(self) -> None:
+        """Acknowledged part ETags survive a process restart and are not uploaded twice."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root, item, state_path = self._multipart_fixture(Path(temporary_directory))
+            with mock.patch.multiple(
+                "scripts.upload_public_release",
+                DIRECT_LIMIT=8,
+                PART_SIZE=5,
+            ):
+                interrupted = FakeMultipartUploader(state_path, fail_part=2)
+                with self.assertRaisesRegex(UploadFailure, "interrupted"):
+                    interrupted.upload(root, item)
+                self.assertNotIn("abort", [call["route"] for call in interrupted.calls])
+                checkpoint = json.loads(state_path.read_text(encoding="utf-8").splitlines()[-1])
+                self.assertEqual(checkpoint["upload_id"], "upload-one")
+                self.assertEqual(checkpoint["parts"], [{"partNumber": 1, "etag": "etag-1"}])
+                self.assertRegex(checkpoint["metadata_sha256"], r"^[a-f0-9]{64}$")
+
+                resumed = FakeMultipartUploader(state_path)
+                self.assertEqual(resumed.upload(root, item), "uploaded")
+                routes = [call["route"] for call in resumed.calls]
+                self.assertNotIn("init", routes)
+                self.assertEqual(
+                    [call["part"] for call in resumed.calls if call["route"] == "part"],
+                    ["2", "3"],
+                )
+                complete = next(call for call in resumed.calls if call["route"] == "complete")
+                self.assertEqual(
+                    complete["json"]["parts"],
+                    [
+                        {"partNumber": 1, "etag": "etag-1"},
+                        {"partNumber": 2, "etag": "etag-2"},
+                        {"partNumber": 3, "etag": "etag-3"},
+                    ],
+                )
+                final_record = json.loads(state_path.read_text(encoding="utf-8").splitlines()[-1])
+                self.assertEqual(final_record["event"], "complete")
+
+    def test_multipart_resume_rehashes_before_any_network_request(self) -> None:
+        """A same-size local mutation stops a resumed multipart upload before HTTP."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root, item, state_path = self._multipart_fixture(Path(temporary_directory))
+            with mock.patch.multiple(
+                "scripts.upload_public_release",
+                DIRECT_LIMIT=8,
+                PART_SIZE=5,
+            ):
+                interrupted = FakeMultipartUploader(state_path, fail_part=2)
+                with self.assertRaises(UploadFailure):
+                    interrupted.upload(root, item)
+                (root / item.path).write_bytes(b"XXXXXXXXXXXX")
+
+                resumed = FakeMultipartUploader(state_path)
+                with self.assertRaisesRegex(UploadFailure, "SHA-256 mismatch"):
+                    resumed.upload(root, item)
+                self.assertEqual(resumed.calls, [])
+
+    def test_invalid_completion_keeps_resumable_parts(self) -> None:
+        """A failed final-object check cannot be recorded as a completed object."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root, item, state_path = self._multipart_fixture(Path(temporary_directory))
+            with mock.patch.multiple(
+                "scripts.upload_public_release",
+                DIRECT_LIMIT=8,
+                PART_SIZE=5,
+            ):
+                invalid = FakeMultipartUploader(state_path, invalid_complete=True)
+                with self.assertRaisesRegex(UploadFailure, "final R2 object"):
+                    invalid.upload(root, item)
+                record = json.loads(state_path.read_text(encoding="utf-8").splitlines()[-1])
+                self.assertEqual(record["event"], "multipart")
+                self.assertEqual(len(record["parts"]), 3)
+
+                resumed = FakeMultipartUploader(state_path)
+                self.assertEqual(resumed.upload(root, item), "uploaded")
+                self.assertEqual([call["route"] for call in resumed.calls], ["complete"])
+
+    def test_expired_multipart_checkpoint_restarts_once(self) -> None:
+        """A known-expired R2 upload is tombstoned and replaced without manual cleanup."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root, item, state_path = self._multipart_fixture(Path(temporary_directory))
+            with mock.patch.multiple(
+                "scripts.upload_public_release",
+                DIRECT_LIMIT=8,
+                PART_SIZE=5,
+            ):
+                uploader = FakeMultipartUploader(state_path, missing_part_once=2)
+                self.assertEqual(uploader.upload(root, item), "uploaded")
+                self.assertEqual(
+                    [call["route"] for call in uploader.calls],
+                    ["init", "part", "part", "init", "part", "part", "part", "complete"],
+                )
+                events = [
+                    json.loads(line)["event"]
+                    for line in state_path.read_text(encoding="utf-8").splitlines()
+                ]
+                self.assertIn("abort", events)
+                self.assertEqual(events[-1], "complete")
+
+    def test_stable_worker_conflict_maps_to_missing_upload_signal(self) -> None:
+        """The Worker 409 code triggers restart logic instead of a permanent generic failure."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            uploader = PublicReleaseUploader(
+                "https://example.invalid",
+                "x" * 32,
+                None,
+                Path(temporary_directory) / "state.jsonl",
+                "releases/test-release/",
+            )
+            response = mock.Mock(
+                status_code=409,
+                headers={},
+            )
+            response.json.return_value = {
+                "ok": False,
+                "code": "multipart_upload_missing",
+            }
+            session = mock.Mock()
+            session.request.return_value = response
+
+            with mock.patch.object(uploader, "_session", return_value=session):
+                with self.assertRaises(MultipartUploadMissing):
+                    uploader._request_with_retry("PUT", "https://example.invalid/part")
+
+    def test_changed_multipart_metadata_is_aborted_before_replacement(self) -> None:
+        """A checkpoint initialized with different HTTP metadata is never resumed."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root, item, state_path = self._multipart_fixture(Path(temporary_directory))
+            state_path.write_text(
+                json.dumps({
+                    "event": "multipart",
+                    "path": item.path,
+                    "prefix": "releases/test-release/",
+                    "sha256": item.sha256,
+                    "size": item.size,
+                    "part_size": 5,
+                    "metadata_sha256": "0" * 64,
+                    "upload_id": "old-upload",
+                    "parts": [],
+                }) + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.multiple(
+                "scripts.upload_public_release",
+                DIRECT_LIMIT=8,
+                PART_SIZE=5,
+            ):
+                uploader = FakeMultipartUploader(state_path)
+                self.assertEqual(uploader.upload(root, item), "uploaded")
+                self.assertEqual(
+                    [call["route"] for call in uploader.calls],
+                    ["abort", "init", "part", "part", "part", "complete"],
+                )
 
     def test_collects_every_inventory_page_before_marking_complete(self) -> None:
         """A truncated first page must be followed through its opaque cursor."""
@@ -353,6 +637,24 @@ class UploadManifestTest(unittest.TestCase):
             encoding="utf-8",
         )
         return root, manifest_path, load_manifest(manifest_path, root), catalog_hash
+
+    @staticmethod
+    def _multipart_fixture(base: Path) -> tuple[Path, ReleaseFile, Path]:
+        """Create one tiny file whose thresholds can be patched into three parts."""
+        root = base / "release"
+        assets = root / "assets"
+        assets.mkdir(parents=True)
+        payload = assets / "payload.bin"
+        payload.write_bytes(b"abcdefghijkl")
+        sha256 = hashlib.sha256(payload.read_bytes()).hexdigest()
+        item = ReleaseFile(
+            "assets/payload.bin",
+            payload.stat().st_size,
+            sha256,
+            "application/octet-stream",
+            "public, max-age=31536000, immutable",
+        )
+        return root, item, base / "upload-state.jsonl"
 
 
 if __name__ == "__main__":
