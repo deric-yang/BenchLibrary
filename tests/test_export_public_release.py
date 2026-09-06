@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -10,12 +11,14 @@ import unittest
 import zipfile
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from scripts.export_public_release import (
     ExportError,
     PublicReleaseExporter,
     SecurityError,
     _sha256_and_scan,
+    _text_line_count,
     sanitize_json,
 )
 
@@ -220,6 +223,58 @@ class PublicReleaseExporterTest(unittest.TestCase):
         }
         _write_json(self.policy_path, self.policy)
 
+    def _add_text_preview_bundle(self) -> tuple[str, bytes, bytes, str, str]:
+        """Add a two-schema text bundle containing two JWT-shaped fixture strings."""
+        object_id = "b" * 64
+        bundle_path = f"assets/previews/text/{object_id[:2]}/{object_id}"
+        first_chunk_path = f"{bundle_path}/chunk-00001.txt"
+        second_chunk_path = f"{bundle_path}/chunk-00002.txt"
+        first_token = f"eyJ{'A' * 12}.{'B' * 12}.{'C' * 12}"
+        second_token = f"eyJ{'D' * 12}.{'E' * 12}.{'F' * 12}"
+        first_payload = f"first\n{first_token}\n{second_token}\nlast\n".encode()
+        second_payload = "alpha\r\nbeta\r\n".encode()
+        first_chunk = self.source / first_chunk_path
+        first_chunk.parent.mkdir(parents=True)
+        first_chunk.write_bytes(first_payload)
+        (self.source / second_chunk_path).write_bytes(second_payload)
+        manifest = {
+            "chunks": [
+                {"bytes": len(first_payload), "index": 0, "lines": 4, "url": first_chunk_path},
+                {"bytes": len(second_payload), "index": 1, "lines": 2, "url": second_chunk_path},
+            ],
+            "preview_kind": "text_chunks",
+            "schema_version": 1,
+            "text_chunks": [
+                {
+                    "bytes": len(first_payload),
+                    "end_line": 4,
+                    "start_line": 1,
+                    "url": first_chunk_path,
+                },
+                {
+                    "bytes": len(second_payload),
+                    "end_line": 6,
+                    "start_line": 5,
+                    "url": second_chunk_path,
+                },
+            ],
+            "total_chunks": 2,
+            "total_lines": 6,
+        }
+        _write_json(self.source / bundle_path / "manifest.json", manifest)
+        preview_shard = self.source / "assets/index_shards/preview/full-bench/tasks-0000.json"
+        preview_index = json.loads(preview_shard.read_text(encoding="utf-8"))
+        preview_index["records"].append(
+            {
+                "preview_url": f"{bundle_path}/manifest.json",
+                "text_chunks": copy.deepcopy(manifest["text_chunks"]),
+                "total_chunks": 2,
+                "total_lines": 6,
+            }
+        )
+        _write_json(preview_shard, preview_index)
+        return bundle_path, first_payload, second_payload, first_token, second_token
+
     def _export(self) -> dict[str, Any]:
         """Run the fixture export and return its in-memory manifest."""
         exporter = PublicReleaseExporter(
@@ -267,6 +322,290 @@ class PublicReleaseExporterTest(unittest.TestCase):
         manifest_paths = {item["path"] for item in manifest["files"]}
         self.assertIn("site/app.js", manifest_paths)
         self.assertNotIn("assets/private/closed.json", manifest_paths)
+
+    def test_redacts_text_preview_copy_on_write_and_synchronizes_manifest(self) -> None:
+        """Strong preview credentials are redacted without changing source inode bytes."""
+        bundle_path, first_source_bytes, second_source_bytes, first_token, second_token = (
+            self._add_text_preview_bundle()
+        )
+        source_chunk = self.source / bundle_path / "chunk-00001.txt"
+        source_manifest = self.source / bundle_path / "manifest.json"
+        source_preview_shard = self.source / "assets/index_shards/preview/full-bench/tasks-0000.json"
+        source_chunk_inode = source_chunk.stat().st_ino
+        source_manifest_bytes = source_manifest.read_bytes()
+        source_preview_shard_bytes = source_preview_shard.read_bytes()
+
+        release_manifest = self._export()
+
+        public_chunk = self.destination / bundle_path / "chunk-00001.txt"
+        public_second_chunk = self.destination / bundle_path / "chunk-00002.txt"
+        public_manifest_path = self.destination / bundle_path / "manifest.json"
+        public_bytes = public_chunk.read_bytes()
+        self.assertEqual(source_chunk.read_bytes(), first_source_bytes)
+        self.assertEqual(source_chunk.stat().st_ino, source_chunk_inode)
+        self.assertEqual(source_manifest.read_bytes(), source_manifest_bytes)
+        self.assertEqual(source_preview_shard.read_bytes(), source_preview_shard_bytes)
+        self.assertNotEqual(public_chunk.stat().st_ino, source_chunk.stat().st_ino)
+        self.assertNotEqual(public_manifest_path.stat().st_ino, source_manifest.stat().st_ino)
+        self.assertNotIn(first_token.encode(), public_bytes)
+        self.assertNotIn(second_token.encode(), public_bytes)
+        self.assertEqual(public_bytes.count(b"[REDACTED]"), 2)
+        self.assertEqual(public_second_chunk.read_bytes(), second_source_bytes)
+        self.assertEqual(
+            public_second_chunk.stat().st_ino,
+            (self.source / bundle_path / "chunk-00002.txt").stat().st_ino,
+        )
+
+        bundle_manifest = json.loads(public_manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(bundle_manifest["chunks"][0]["bytes"], len(public_bytes))
+        self.assertEqual(bundle_manifest["chunks"][0]["lines"], 4)
+        self.assertEqual(bundle_manifest["chunks"][1]["bytes"], len(second_source_bytes))
+        self.assertEqual(bundle_manifest["chunks"][1]["lines"], 2)
+        self.assertEqual(bundle_manifest["text_chunks"][0]["bytes"], len(public_bytes))
+        self.assertEqual(bundle_manifest["text_chunks"][0]["lines"], 4)
+        self.assertEqual(bundle_manifest["text_chunks"][0]["start_line"], 1)
+        self.assertEqual(bundle_manifest["text_chunks"][0]["end_line"], 4)
+        self.assertEqual(bundle_manifest["text_chunks"][1]["start_line"], 5)
+        self.assertEqual(bundle_manifest["text_chunks"][1]["end_line"], 6)
+        self.assertEqual(bundle_manifest["total_chunks"], 2)
+        self.assertEqual(bundle_manifest["total_lines"], 6)
+        notice = bundle_manifest["public_release"]["text_preview_redaction"]
+        self.assertEqual(notice["redacted_chunk_count"], 1)
+        self.assertEqual(notice["redaction_count"], 2)
+        public_preview_shard_path = (
+            self.destination / "assets/index_shards/preview/full-bench/tasks-0000.json"
+        )
+        self.assertNotEqual(public_preview_shard_path.stat().st_ino, source_preview_shard.stat().st_ino)
+        public_preview_shard = json.loads(public_preview_shard_path.read_text(encoding="utf-8"))
+        preview_record = public_preview_shard["records"][-1]
+        self.assertEqual(preview_record["text_chunks"][0]["bytes"], len(public_bytes))
+        self.assertEqual(preview_record["text_chunks"][0]["lines"], 4)
+        self.assertEqual(preview_record["text_chunks"][0]["start_line"], 1)
+        self.assertEqual(preview_record["text_chunks"][0]["end_line"], 4)
+        self.assertEqual(preview_record["text_chunks"][1]["start_line"], 5)
+        self.assertEqual(preview_record["text_chunks"][1]["end_line"], 6)
+        self.assertEqual(preview_record["total_chunks"], 2)
+        self.assertEqual(preview_record["total_lines"], 6)
+
+        manifest_entry = next(
+            item for item in release_manifest["files"] if item["path"] == f"{bundle_path}/chunk-00001.txt"
+        )
+        self.assertEqual(
+            manifest_entry["sha256"],
+            _sha256_and_scan(public_chunk, manifest_entry["path"]),
+        )
+        self.assertEqual(manifest_entry["size"], len(public_bytes))
+        self.assertGreaterEqual(release_manifest["totals"]["redactions"], 4)
+
+    def test_text_preview_line_count_has_stable_newline_semantics(self) -> None:
+        """Empty, trailing-newline, and CRLF chunks retain deterministic line counts."""
+        self.assertEqual(_text_line_count(b"", "empty.txt"), 0)
+        self.assertEqual(_text_line_count(b"one\n", "trailing.txt"), 1)
+        self.assertEqual(_text_line_count(b"one\r\ntwo\r\n", "crlf.txt"), 2)
+
+    def test_rejects_credential_spanning_adjacent_text_chunks(self) -> None:
+        """Manifest-ordered overlap scanning catches a JWT split across two files."""
+        bundle_path, _, _, _, _ = self._add_text_preview_bundle()
+        token = f"eyJ{'Q' * 12}.{'R' * 12}.{'S' * 12}".encode()
+        split_at = len(token) // 2
+        payloads = [b"prefix " + token[:split_at], token[split_at:] + b" suffix"]
+        chunk_paths = [
+            f"{bundle_path}/chunk-00001.txt",
+            f"{bundle_path}/chunk-00002.txt",
+        ]
+        for relative_path, payload in zip(chunk_paths, payloads):
+            (self.source / relative_path).write_bytes(payload)
+
+        manifest_path = self.source / bundle_path / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for field_name in ("chunks", "text_chunks"):
+            line_cursor = 1
+            for index, entry in enumerate(manifest[field_name]):
+                line_count = _text_line_count(payloads[index], chunk_paths[index])
+                entry["bytes"] = len(payloads[index])
+                entry["lines"] = line_count
+                if "start_line" in entry or "end_line" in entry:
+                    entry["start_line"] = line_cursor
+                    entry["end_line"] = line_cursor + line_count - 1
+                line_cursor += line_count
+        manifest["total_lines"] = sum(
+            _text_line_count(payload, relative_path)
+            for payload, relative_path in zip(payloads, chunk_paths)
+        )
+        _write_json(manifest_path, manifest)
+
+        preview_shard = self.source / "assets/index_shards/preview/full-bench/tasks-0000.json"
+        preview_index = json.loads(preview_shard.read_text(encoding="utf-8"))
+        preview_record = preview_index["records"][-1]
+        preview_record["text_chunks"] = copy.deepcopy(manifest["text_chunks"])
+        preview_record["total_lines"] = manifest["total_lines"]
+        _write_json(preview_shard, preview_index)
+        source_bytes = [self.source.joinpath(path).read_bytes() for path in chunk_paths]
+
+        with self.assertRaisesRegex(SecurityError, "logical text preview bundle"):
+            self._export()
+
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(
+            [self.source.joinpath(path).read_bytes() for path in chunk_paths],
+            source_bytes,
+        )
+
+    def test_redacts_text_chunks_only_manifest_schema(self) -> None:
+        """A bundle declaring only text_chunks receives the same synchronized metadata."""
+        bundle_path, _, _, _, _ = self._add_text_preview_bundle()
+        source_manifest = self.source / bundle_path / "manifest.json"
+        manifest = json.loads(source_manifest.read_text(encoding="utf-8"))
+        manifest.pop("chunks")
+        _write_json(source_manifest, manifest)
+
+        self._export()
+
+        public_manifest = json.loads(
+            (self.destination / bundle_path / "manifest.json").read_text(encoding="utf-8")
+        )
+        first_chunk = (self.destination / bundle_path / "chunk-00001.txt").read_bytes()
+        self.assertNotIn("chunks", public_manifest)
+        self.assertEqual(public_manifest["text_chunks"][0]["bytes"], len(first_chunk))
+        self.assertEqual(public_manifest["text_chunks"][0]["lines"], 4)
+        self.assertEqual(public_manifest["total_chunks"], 2)
+        self.assertEqual(public_manifest["total_lines"], 6)
+
+    def test_duplicate_preview_shard_chunk_reference_fails_closed(self) -> None:
+        """The same changed chunk cannot be declared twice in one shard chunk list."""
+        bundle_path, first_source_bytes, _, _, _ = self._add_text_preview_bundle()
+        preview_shard = self.source / "assets/index_shards/preview/full-bench/tasks-0000.json"
+        preview_index = json.loads(preview_shard.read_text(encoding="utf-8"))
+        text_chunks = preview_index["records"][-1]["text_chunks"]
+        text_chunks.append(copy.deepcopy(text_chunks[0]))
+        _write_json(preview_shard, preview_index)
+
+        with self.assertRaisesRegex(ExportError, "Duplicate text preview chunk"):
+            self._export()
+
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(
+            (self.source / bundle_path / "chunk-00001.txt").read_bytes(),
+            first_source_bytes,
+        )
+
+    def test_conflicting_preview_shard_chunk_paths_fail_closed(self) -> None:
+        """Disagreeing url/path fields cannot redirect a changed chunk metadata update."""
+        bundle_path, first_source_bytes, _, _, _ = self._add_text_preview_bundle()
+        preview_shard = self.source / "assets/index_shards/preview/full-bench/tasks-0000.json"
+        preview_index = json.loads(preview_shard.read_text(encoding="utf-8"))
+        preview_index["records"][-1]["text_chunks"][0]["path"] = (
+            f"{bundle_path}/chunk-00002.txt"
+        )
+        _write_json(preview_shard, preview_index)
+
+        with self.assertRaisesRegex(ExportError, "Conflicting text chunk references"):
+            self._export()
+
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(
+            (self.source / bundle_path / "chunk-00001.txt").read_bytes(),
+            first_source_bytes,
+        )
+
+    def test_copy_on_write_replacement_allows_generated_file_without_source(self) -> None:
+        """Generated export files can be atomically replaced without a source counterpart."""
+        exporter = PublicReleaseExporter(
+            self.source,
+            self.destination,
+            self.policy_path,
+            "fixture-release",
+        )
+        exporter._prepare_destination()
+        relative_path = "assets/generated-only.txt"
+        target = exporter._destination_path(relative_path)
+        target.write_bytes(b"before")
+        exporter.exported.add(relative_path)
+        exporter.generated_files = 1
+
+        exporter._replace_exported_file(relative_path, b"after")
+
+        self.assertEqual(target.read_bytes(), b"after")
+        self.assertEqual(exporter.generated_files, 1)
+        self.assertEqual(exporter.hardlinked_files, 0)
+
+    def test_generated_json_replaces_existing_hardlink_copy_on_write(self) -> None:
+        """Regenerating an exported JSON file cannot write through to its source inode."""
+        relative_path = "data/existing-generated.json"
+        source_path = self.source / relative_path
+        original_payload = b'{"source":"immutable"}\n'
+        source_path.write_bytes(original_payload)
+        exporter = PublicReleaseExporter(
+            self.source,
+            self.destination,
+            self.policy_path,
+            "fixture-release",
+        )
+        exporter._prepare_destination()
+        exporter._hardlink(relative_path, source_path)
+
+        exporter._write_generated_json(relative_path, {"generated": True}, discover=False)
+
+        target = exporter.partial / relative_path
+        self.assertEqual(source_path.read_bytes(), original_payload)
+        self.assertNotEqual(target.stat().st_ino, source_path.stat().st_ino)
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"generated": True})
+        self.assertEqual(exporter.generated_files, 1)
+        self.assertEqual(exporter.hardlinked_files, 0)
+
+    def test_referenced_source_public_manifest_is_reserved_and_unchanged(self) -> None:
+        """A source self-manifest reference resolves to the newly generated public manifest."""
+        source_manifest = self.source / "data/public_manifest.json"
+        _write_json(source_manifest, {"sentinel": "immutable-source-manifest"})
+        full_shard_path = self.source / "data/benches/full-bench.json"
+        full_shard = json.loads(full_shard_path.read_text(encoding="utf-8"))
+        full_shard["tasks"][0]["manifest_url"] = "data/public_manifest.json"
+        _write_json(full_shard_path, full_shard)
+        self._refresh_policy_pins()
+        source_bytes = source_manifest.read_bytes()
+        source_inode = source_manifest.stat().st_ino
+
+        manifest = self._export()
+
+        public_manifest_path = self.destination / "data/public_manifest.json"
+        public_manifest = json.loads(public_manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(source_manifest.read_bytes(), source_bytes)
+        self.assertEqual(source_manifest.stat().st_ino, source_inode)
+        self.assertNotEqual(public_manifest_path.stat().st_ino, source_inode)
+        self.assertEqual(public_manifest["release_id"], "fixture-release")
+        self.assertEqual(public_manifest["self"]["path"], "data/public_manifest.json")
+        self.assertNotIn("sentinel", public_manifest)
+        self.assertNotIn("data/public_manifest.json", {item["path"] for item in manifest["files"]})
+        self.assertEqual(manifest["totals"]["files"], len(manifest["files"]))
+        self.assertEqual(
+            manifest["totals"]["files"],
+            manifest["totals"]["generated_files"] + manifest["totals"]["hardlinked_files"],
+        )
+
+    def test_manifest_process_pool_preserves_sorted_path_digest_binding(self) -> None:
+        """Out-of-order worker results still produce sorted correctly paired manifest entries."""
+        with (
+            mock.patch("scripts.export_public_release.os.cpu_count", return_value=64),
+            mock.patch(
+                "scripts.export_public_release.concurrent.futures.ProcessPoolExecutor"
+            ) as process_pool,
+        ):
+            executor = process_pool.return_value.__enter__.return_value
+
+            def reversed_results(function: Any, items: Any, chunksize: int) -> list[Any]:
+                """Simulate process completions arriving in reverse input order."""
+                del chunksize
+                return [function(item) for item in reversed(list(items))]
+
+            executor.map.side_effect = reversed_results
+            manifest = self._export()
+
+        process_pool.assert_called_once_with(max_workers=4)
+        manifest_paths = [item["path"] for item in manifest["files"]]
+        self.assertEqual(manifest_paths, sorted(manifest_paths))
+        for entry in manifest["files"]:
+            public_path = self.destination.joinpath(*Path(entry["path"]).parts)
+            self.assertEqual(entry["sha256"], hashlib.sha256(public_path.read_bytes()).hexdigest())
 
     def test_rejects_symlinked_dependency(self) -> None:
         """A referenced symlink cannot escape or alias the immutable release tree."""

@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 import zipfile
 from collections import deque
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ MAX_ARCHIVE_FILES = 250_000
 MAX_ARCHIVE_MEMBER_BYTES = 4 * 1024 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 20 * 1024 * 1024 * 1024
 PUBLIC_TOP_LEVELS = frozenset({"assets", "data"})
+PUBLIC_MANIFEST_PATH = "data/public_manifest.json"
 STRICT_REFERENCE_KEYS = frozenset(
     {
         "asset_path",
@@ -236,6 +238,56 @@ def _is_sensitive_match(chunk: bytes) -> bool:
     return any(pattern.search(chunk) is not None for pattern in SECRET_PATTERNS_BYTES)
 
 
+def _redact_strong_credentials(payload: bytes) -> tuple[bytes, int]:
+    """Replace only strong scanner matches while preserving all other preview bytes."""
+    result = payload
+    redactions = 0
+    for pattern in SECRET_PATTERNS_BYTES:
+        result, count = pattern.subn(b"[REDACTED]", result)
+        redactions += count
+    return result, redactions
+
+
+def _text_line_count(payload: bytes, relative_path: str) -> int:
+    """Count logical UTF-8 text lines with stable empty and trailing-newline semantics."""
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ExportError(f"Text preview chunk is not valid UTF-8: {relative_path}") from exc
+    return len(text.splitlines()) if text else 0
+
+
+def _is_text_preview_chunk_path(relative_path: str) -> bool:
+    """Return whether a canonical release path names a text-preview chunk."""
+    pure_path = PurePosixPath(relative_path)
+    return (
+        len(pure_path.parts) == 6
+        and pure_path.parts[:3] == ("assets", "previews", "text")
+        and re.fullmatch(r"[0-9a-f]{2}", pure_path.parts[3]) is not None
+        and re.fullmatch(r"[0-9a-f]{64}", pure_path.parts[4]) is not None
+        and re.fullmatch(r"chunk-[0-9]{5}\.txt", pure_path.name) is not None
+    )
+
+
+def _atomic_replace_bytes(path: Path, payload: bytes) -> None:
+    """Atomically replace a file through a fresh inode so hard-linked sources stay immutable."""
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.public-redaction-",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, 0o640)
+        os.replace(temporary_path, path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
 def _iter_file_chunks(path: Path) -> Iterator[bytes]:
     """Stream a file in bounded chunks."""
     with path.open("rb") as handle:
@@ -347,10 +399,11 @@ def _sha256_and_scan(path: Path, relative_path: str) -> str:
     return digest.hexdigest()
 
 
-def _hash_release_file(item: tuple[str, Path]) -> str:
-    """Hash and scan one manifest item for bounded parallel execution."""
+def _hash_release_file(item: tuple[str, Path]) -> tuple[str, int, str]:
+    """Hash and scan one manifest item, returning self-identifying worker output."""
     relative_path, path = item
-    return _sha256_and_scan(path, relative_path)
+    digest = _sha256_and_scan(path, relative_path)
+    return relative_path, path.stat().st_size, digest
 
 
 def _content_metadata(relative_path: str) -> dict[str, str]:
@@ -468,8 +521,9 @@ class PublicReleaseExporter:
         self._export_optional_metadata()
         self._drain_dependencies()
         self._export_site()
+        self._redact_text_preview_credentials()
         manifest = self._build_manifest()
-        self._write_generated_json("data/public_manifest.json", manifest, discover=False)
+        self._write_generated_json(PUBLIC_MANIFEST_PATH, manifest, discover=False)
         self.partial.rename(self.destination)
         return manifest
 
@@ -866,6 +920,8 @@ class PublicReleaseExporter:
         normalized = _normalize_reference(relative_path)
         if normalized is None:
             return
+        if normalized == PUBLIC_MANIFEST_PATH:
+            return
         if _is_forbidden(normalized, self.policy):
             raise SecurityError(f"JSON references forbidden path: {normalized}")
         scoped_benchmark = self._scoped_benchmark(normalized)
@@ -900,6 +956,8 @@ class PublicReleaseExporter:
     def _enqueue_references(self, value: Any) -> None:
         """Queue real local references while ignoring missing logical filenames in task prose."""
         for relative_path, parent_key in iter_local_reference_candidates(value):
+            if relative_path == PUBLIC_MANIFEST_PATH:
+                continue
             try:
                 self._source_path(relative_path)
             except SecurityError:
@@ -937,16 +995,22 @@ class PublicReleaseExporter:
         if _is_sensitive_match(payload):
             raise SecurityError(f"Credential-shaped content survived JSON sanitization: {relative_path}")
         target = self._destination_path(relative_path)
-        target.write_bytes(payload)
-        os.chmod(target, 0o640)
-        self.exported.add(relative_path)
-        self.generated_files += 1
+        if relative_path in self.exported:
+            self._replace_exported_file(relative_path, payload)
+        else:
+            if target.exists() or target.is_symlink():
+                raise ExportError(f"Untracked destination file blocks generated JSON: {relative_path}")
+            _atomic_replace_bytes(target, payload)
+            self.exported.add(relative_path)
+            self.generated_files += 1
         self.redactions += count
         if discover:
             self._enqueue_references(sanitized)
 
     def _hardlink(self, relative_path: str, source_path: Path) -> None:
         """Hard-link one unchanged source file and fail instead of copying across filesystems."""
+        if relative_path == PUBLIC_MANIFEST_PATH:
+            raise ExportError(f"Generated public manifest path cannot be hard-linked: {relative_path}")
         target = self._destination_path(relative_path)
         try:
             os.link(source_path, target, follow_symlinks=False)
@@ -1025,29 +1089,373 @@ class PublicReleaseExporter:
             if path.is_file():
                 yield path.relative_to(self.partial).as_posix(), path
 
+    def _replace_exported_file(self, relative_path: str, payload: bytes) -> None:
+        """Replace one exported file copy-on-write and keep file-type accounting accurate."""
+        target = self.partial.joinpath(*PurePosixPath(relative_path).parts)
+        if relative_path not in self.exported or target.is_symlink() or not target.is_file():
+            raise ExportError(f"Cannot replace missing exported file: {relative_path}")
+        source_candidate = self.source.joinpath(*PurePosixPath(relative_path).parts)
+        try:
+            source_candidate.lstat()
+        except FileNotFoundError:
+            was_hardlinked = False
+        else:
+            source_path = self._source_path(relative_path)
+            was_hardlinked = os.path.samefile(source_path, target)
+        _atomic_replace_bytes(target, payload)
+        if was_hardlinked:
+            if self.hardlinked_files < 1:
+                raise ExportError("Hard-link accounting underflow during text preview redaction")
+            self.hardlinked_files -= 1
+            self.generated_files += 1
+
+    def _manifest_chunk_path(
+        self,
+        entry: dict[str, Any],
+        bundle_path: str,
+        field_name: str,
+    ) -> str:
+        """Resolve one manifest chunk entry and confine it to its own preview bundle."""
+        references = []
+        for key in ("local_url", "url", "path"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized = _normalize_reference(value)
+                if normalized is None:
+                    raise SecurityError(
+                        f"Invalid {field_name} chunk reference in {bundle_path}: {value!r}"
+                    )
+                references.append(normalized)
+        if not references or len(set(references)) != 1:
+            raise ExportError(f"Ambiguous {field_name} chunk reference in {bundle_path}")
+        relative_path = references[0]
+        if (
+            PurePosixPath(relative_path).parent.as_posix() != bundle_path
+            or not _is_text_preview_chunk_path(relative_path)
+        ):
+            raise SecurityError(f"Text preview chunk escapes its bundle: {relative_path}")
+        return relative_path
+
+    def _changed_chunk_reference(
+        self,
+        entry: dict[str, Any],
+        changes: dict[str, tuple[bytes, int]],
+        json_path: str,
+    ) -> str | None:
+        """Find one changed chunk reference and reject conflicting path fields."""
+        references: list[str] = []
+        for key in ("local_url", "url", "path"):
+            value = entry.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            normalized = _normalize_reference(value)
+            if normalized is not None:
+                references.append(normalized)
+        matched = set(references) & set(changes)
+        if not matched:
+            return None
+        if len(matched) != 1 or len(set(references)) != 1:
+            raise ExportError(f"Conflicting text chunk references in {json_path}")
+        return next(iter(matched))
+
+    def _synchronize_chunk_metadata_in_json(
+        self,
+        value: Any,
+        changes: dict[str, tuple[bytes, int]],
+        json_path: str,
+    ) -> tuple[Any, set[str]]:
+        """Update only chunks/text_chunks arrays that reference changed preview files."""
+        updated = copy.deepcopy(value)
+        seen_containers: dict[str, int] = {}
+        synchronized: set[str] = set()
+
+        def visit(node: Any) -> None:
+            """Recursively inspect JSON containers without altering unrelated fields."""
+            if isinstance(node, list):
+                for child in node:
+                    visit(child)
+                return
+            if not isinstance(node, dict):
+                return
+
+            synchronized_fields: dict[str, tuple[list[str], list[int]]] = {}
+            for field_name in ("chunks", "text_chunks"):
+                entries = node.get(field_name)
+                if not isinstance(entries, list):
+                    continue
+                changed_paths = {
+                    reference
+                    for entry in entries
+                    if isinstance(entry, dict)
+                    for reference in [self._changed_chunk_reference(entry, changes, json_path)]
+                    if reference is not None
+                }
+                if not changed_paths:
+                    continue
+                bundle_path = PurePosixPath(next(iter(changed_paths))).parent.as_posix()
+                entry_paths: list[str] = []
+                line_counts: list[int] = []
+                line_cursor = 1
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        raise ExportError(f"{json_path} {field_name} entries must be objects")
+                    relative_path = self._manifest_chunk_path(entry, bundle_path, field_name)
+                    if relative_path in entry_paths:
+                        raise ExportError(
+                            f"Duplicate text preview chunk in {json_path}: {relative_path}"
+                        )
+                    chunk_target = self.partial.joinpath(*PurePosixPath(relative_path).parts)
+                    if chunk_target.is_symlink() or not chunk_target.is_file():
+                        raise ExportError(
+                            f"JSON references a missing text preview chunk: {relative_path}"
+                        )
+                    payload = (
+                        changes[relative_path][0]
+                        if relative_path in changes
+                        else chunk_target.read_bytes()
+                    )
+                    line_count = _text_line_count(payload, relative_path)
+                    entry["bytes"] = len(payload)
+                    entry["lines"] = line_count
+                    if "start_line" in entry or "end_line" in entry:
+                        entry["start_line"] = line_cursor
+                        entry["end_line"] = line_cursor + line_count - 1
+                    line_cursor += line_count
+                    entry_paths.append(relative_path)
+                    line_counts.append(line_count)
+                synchronized_fields[field_name] = (entry_paths, line_counts)
+                for relative_path in changed_paths:
+                    previous_container = seen_containers.get(relative_path)
+                    if previous_container is not None and previous_container != id(node):
+                        raise ExportError(
+                            f"Duplicate changed chunk reference in {json_path}: {relative_path}"
+                        )
+                    seen_containers[relative_path] = id(node)
+                    synchronized.add(relative_path)
+
+            if synchronized_fields:
+                sequences = list(synchronized_fields.values())
+                canonical_paths, canonical_lines = sequences[0]
+                if any(paths != canonical_paths for paths, _ in sequences[1:]):
+                    raise ExportError(f"Text preview chunk lists disagree in {json_path}")
+                node["total_chunks"] = len(canonical_paths)
+                node["total_lines"] = sum(canonical_lines)
+            for key, child in node.items():
+                if key not in synchronized_fields:
+                    visit(child)
+
+        visit(updated)
+        return updated, synchronized
+
+    def _updated_exported_chunk_metadata(
+        self,
+        changes: dict[str, tuple[bytes, int]],
+        excluded_paths: set[str],
+    ) -> list[tuple[str, bytes, int]]:
+        """Prepare sanitized replacements for exported JSON records referencing changed chunks."""
+        plans: list[tuple[str, bytes, int]] = []
+        needles = tuple(relative_path.encode("utf-8") for relative_path in changes)
+        for relative_path, path in self._iter_partial_files():
+            if relative_path in excluded_paths or not relative_path.endswith(".json"):
+                continue
+            raw_payload = path.read_bytes()
+            if not any(needle in raw_payload for needle in needles):
+                continue
+            value = _load_json_file(path)
+            updated, synchronized = self._synchronize_chunk_metadata_in_json(
+                value,
+                changes,
+                relative_path,
+            )
+            if not synchronized:
+                continue
+            sanitized, redactions = sanitize_json(updated)
+            payload = _json_bytes(sanitized)
+            if _is_sensitive_match(payload):
+                raise SecurityError(f"Credential-shaped content remains in {relative_path}")
+            plans.append((relative_path, payload, redactions))
+        return plans
+
+    def _updated_text_preview_manifest(
+        self,
+        bundle_path: str,
+        changes: dict[str, tuple[bytes, int]],
+    ) -> tuple[str, bytes, list[str]]:
+        """Return a bundle manifest synchronized with copy-on-write chunk redactions."""
+        manifest_path = f"{bundle_path}/manifest.json"
+        target = self.partial.joinpath(*PurePosixPath(manifest_path).parts)
+        if manifest_path not in self.exported or target.is_symlink() or not target.is_file():
+            raise ExportError(f"Text preview bundle has no exported manifest: {bundle_path}")
+        value = _load_json_file(target)
+        if not isinstance(value, dict):
+            raise ExportError(f"Text preview bundle manifest must be an object: {manifest_path}")
+        updated = copy.deepcopy(value)
+        declared_lists: list[tuple[str, list[Any]]] = []
+        for field_name in ("chunks", "text_chunks"):
+            entries = updated.get(field_name)
+            if entries is None:
+                continue
+            if not isinstance(entries, list):
+                raise ExportError(f"{manifest_path} field {field_name!r} must be a list")
+            declared_lists.append((field_name, entries))
+        if not declared_lists:
+            raise ExportError(f"Text preview bundle manifest has no chunk list: {manifest_path}")
+
+        canonical_paths: list[str] | None = None
+        canonical_line_counts: list[int] = []
+        for field_name, entries in declared_lists:
+            entry_paths: list[str] = []
+            line_counts: list[int] = []
+            line_cursor = 1
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ExportError(f"{manifest_path} {field_name} entries must be objects")
+                relative_path = self._manifest_chunk_path(entry, bundle_path, field_name)
+                if relative_path in entry_paths:
+                    raise ExportError(f"Duplicate text preview chunk in {manifest_path}: {relative_path}")
+                chunk_target = self.partial.joinpath(*PurePosixPath(relative_path).parts)
+                if chunk_target.is_symlink() or not chunk_target.is_file():
+                    raise ExportError(f"Manifest references a missing text preview chunk: {relative_path}")
+                payload = changes[relative_path][0] if relative_path in changes else chunk_target.read_bytes()
+                line_count = _text_line_count(payload, relative_path)
+                entry["bytes"] = len(payload)
+                entry["lines"] = line_count
+                if "start_line" in entry or "end_line" in entry:
+                    entry["start_line"] = line_cursor
+                    entry["end_line"] = line_cursor + line_count - 1
+                line_cursor += line_count
+                entry_paths.append(relative_path)
+                line_counts.append(line_count)
+            if canonical_paths is None:
+                canonical_paths = entry_paths
+                canonical_line_counts = line_counts
+            elif entry_paths != canonical_paths:
+                raise ExportError(f"Text preview chunk lists disagree in {manifest_path}")
+
+        assert canonical_paths is not None
+        missing_changes = set(changes) - set(canonical_paths)
+        if missing_changes:
+            raise ExportError(
+                f"Redacted chunks are absent from {manifest_path}: {sorted(missing_changes)}"
+            )
+        updated["total_chunks"] = len(canonical_paths)
+        updated["total_lines"] = sum(canonical_line_counts)
+        public_release = updated.get("public_release", {})
+        if not isinstance(public_release, dict):
+            raise ExportError(f"{manifest_path} public_release must be an object")
+        public_release["text_preview_redaction"] = {
+            "reason_zh": "公开发布前移除了文本预览中符合强凭据特征的字符串；原始语料保持不变。",
+            "redacted_chunk_count": len(changes),
+            "redaction_count": sum(count for _, count in changes.values()),
+            "replacement": "[REDACTED]",
+        }
+        updated["public_release"] = public_release
+        payload = _json_bytes(updated)
+        if _is_sensitive_match(payload):
+            raise SecurityError(f"Credential-shaped content remains in {manifest_path}")
+        return manifest_path, payload, canonical_paths
+
+    def _scan_text_preview_logical_stream(
+        self,
+        ordered_paths: list[str],
+        changes: dict[str, tuple[bytes, int]],
+        manifest_path: str,
+    ) -> None:
+        """Scan manifest-ordered chunks as one stream so boundary credentials cannot hide."""
+
+        def logical_chunks() -> Iterator[bytes]:
+            """Yield bounded bytes while preserving overlap across adjacent chunk files."""
+            for relative_path in ordered_paths:
+                if relative_path not in changes:
+                    path = self.partial.joinpath(*PurePosixPath(relative_path).parts)
+                    yield from _iter_file_chunks(path)
+                    continue
+                payload = changes[relative_path][0]
+                for offset in range(0, len(payload), CHUNK_BYTES):
+                    yield payload[offset:offset + CHUNK_BYTES]
+
+        _scan_chunks(logical_chunks(), f"logical text preview bundle {manifest_path}")
+
+    def _redact_text_preview_credentials(self) -> None:
+        """Redact strong credentials only in text chunks and synchronize their manifests."""
+        changes_by_bundle: dict[str, dict[str, tuple[bytes, int]]] = {}
+        chunk_paths_by_bundle: dict[str, set[str]] = {}
+        for relative_path, path in self._iter_partial_files():
+            if not _is_text_preview_chunk_path(relative_path):
+                continue
+            bundle_path = PurePosixPath(relative_path).parent.as_posix()
+            chunk_paths_by_bundle.setdefault(bundle_path, set()).add(relative_path)
+            redacted, count = _redact_strong_credentials(path.read_bytes())
+            if not count:
+                continue
+            if _is_sensitive_match(redacted):
+                raise SecurityError(f"Credential-shaped content survived redaction: {relative_path}")
+            changes_by_bundle.setdefault(bundle_path, {})[relative_path] = (redacted, count)
+
+        manifest_plans: list[tuple[str, bytes]] = []
+        all_changes: dict[str, tuple[bytes, int]] = {}
+        for bundle_path in sorted(chunk_paths_by_bundle):
+            changes = changes_by_bundle.get(bundle_path, {})
+            manifest_path, manifest_payload, ordered_paths = self._updated_text_preview_manifest(
+                bundle_path,
+                changes,
+            )
+            if set(ordered_paths) != chunk_paths_by_bundle[bundle_path]:
+                raise ExportError(f"Text preview manifest/file set mismatch: {manifest_path}")
+            self._scan_text_preview_logical_stream(ordered_paths, changes, manifest_path)
+            if changes:
+                manifest_plans.append((manifest_path, manifest_payload))
+                all_changes.update(changes)
+        metadata_plans = (
+            self._updated_exported_chunk_metadata(
+                all_changes,
+                {manifest_path for manifest_path, _ in manifest_plans},
+            )
+            if all_changes
+            else []
+        )
+        for relative_path in sorted(all_changes):
+            self._replace_exported_file(relative_path, all_changes[relative_path][0])
+        for manifest_path, manifest_payload in manifest_plans:
+            self._replace_exported_file(manifest_path, manifest_payload)
+        for relative_path, payload, redactions in metadata_plans:
+            self._replace_exported_file(relative_path, payload)
+            self.redactions += redactions
+        self.redactions += sum(count for _, count in all_changes.values())
+
     def _build_manifest(self) -> dict[str, Any]:
         """Hash and security-scan every exported object and build upload metadata."""
         files = []
         total_bytes = 0
         paths = list(self._iter_partial_files())
-        worker_count = min(4, max(1, os.cpu_count() or 1))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            digests = executor.map(_hash_release_file, paths)
-            hashed_paths = zip(paths, digests)
-            for (relative_path, path), digest in hashed_paths:
-                file_size = path.stat().st_size
-                r2_key = f"releases/{self.release_id}/{relative_path}"
-                if len(r2_key.encode("utf-8")) > 1024:
-                    raise ExportError(f"R2 object key exceeds 1,024 UTF-8 bytes: {relative_path}")
-                entry: dict[str, Any] = {
-                    "path": relative_path,
-                    "r2_key": r2_key,
-                    "sha256": digest,
-                    "size": file_size,
-                }
-                entry.update(_content_metadata(relative_path))
-                files.append(entry)
-                total_bytes += file_size
+        if any(relative_path == PUBLIC_MANIFEST_PATH for relative_path, _ in paths):
+            raise ExportError(f"Reserved generated path was exported too early: {PUBLIC_MANIFEST_PATH}")
+        worker_count = min(4, max(1, os.cpu_count() or 1), max(1, len(paths)))
+        chunksize = max(1, min(32, len(paths) // max(1, worker_count * 8)))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as executor:
+            worker_results = list(executor.map(_hash_release_file, paths, chunksize=chunksize))
+        results_by_path: dict[str, tuple[int, str]] = {}
+        for relative_path, file_size, digest in worker_results:
+            if relative_path in results_by_path:
+                raise ExportError(f"Process pool returned a duplicate path: {relative_path}")
+            results_by_path[relative_path] = (file_size, digest)
+        expected_paths = {relative_path for relative_path, _ in paths}
+        if set(results_by_path) != expected_paths:
+            raise ExportError("Process pool results do not match the exported file set")
+        for relative_path, _ in paths:
+            file_size, digest = results_by_path[relative_path]
+            r2_key = f"releases/{self.release_id}/{relative_path}"
+            if len(r2_key.encode("utf-8")) > 1024:
+                raise ExportError(f"R2 object key exceeds 1,024 UTF-8 bytes: {relative_path}")
+            entry: dict[str, Any] = {
+                "path": relative_path,
+                "r2_key": r2_key,
+                "sha256": digest,
+                "size": file_size,
+            }
+            entry.update(_content_metadata(relative_path))
+            files.append(entry)
+            total_bytes += file_size
         policy_sha256 = hashlib.sha256(self.policy_path.read_bytes()).hexdigest()
         return {
             "files": files,
@@ -1067,8 +1475,8 @@ class PublicReleaseExporter:
             "release_id": self.release_id,
             "schema_version": 1,
             "self": {
-                "path": "data/public_manifest.json",
-                "r2_key": f"releases/{self.release_id}/data/public_manifest.json",
+                "path": PUBLIC_MANIFEST_PATH,
+                "r2_key": f"releases/{self.release_id}/{PUBLIC_MANIFEST_PATH}",
             },
             "source": {
                 "catalog_generated_at": self.source_catalog.get("generated_at"),
