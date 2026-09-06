@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23090b10'/%3E%3Cpath d='M17 18h14l7 7v21H17zM31 18v8h7M25 32h6M25 38h10' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+    <meta name="color-scheme" content="light">
+    <meta name="robots" content="index, follow">
+    <meta name="description" content="KW Bench Library：知识工作与 Office Artifact Benchmark 的独立目录、题库与公开镜像预览站。">
+    <title>KW Bench Library</title>
+    <link rel="stylesheet" href="styles.css?v=20260903c">
+</head>
+<body>
+    <a class="skip-link" href="#mainContent">跳到主要内容</a>
+
+    <header class="site-nav">
+        <button class="mobile-menu-button" id="mobileMenuButton" type="button" aria-label="打开 Benchmark 导航" aria-expanded="false">
+            <span></span><span></span><span></span>
+        </button>
+        <a class="brand" href="./" aria-label="KW Bench Library 首页">
+            <span class="brand-mark" aria-hidden="true"><span>K</span><span>W</span></span>
+            <span class="brand-copy">
+                <strong>KW Bench Library</strong>
+                <small>Knowledge Work · Artifact Benchmarks</small>
+            </span>
+        </a>
+        <div class="nav-context" aria-label="数据状态">
+            <span class="nav-context-label">CATALOG</span>
+            <strong id="navBenchCount">—</strong>
+            <span class="nav-context-divider"></span>
+            <span class="status-dot" id="navStatusDot"></span>
+            <span id="navStatusText" aria-live="polite">准备读取目录</span>
+        </div>
+    </header>
+
+    <div class="app-shell">
+        <div class="sidebar-scrim" id="sidebarScrim" aria-hidden="true"></div>
+        <aside class="bench-sidebar" id="benchSidebar" aria-label="Benchmark 目录">
+            <div class="sidebar-head">
+                <div>
+                    <span class="section-kicker">BENCHMARK CATALOG</span>
+                    <h1>评测目录</h1>
+                </div>
+                <button class="sidebar-close" id="sidebarClose" type="button" aria-label="关闭导航">×</button>
+            </div>
+
+            <label class="sidebar-search">
+                <span class="visually-hidden">搜索 Benchmark</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.3-4.3m2.3-5.2a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"></path></svg>
+                <input id="benchSearch" type="search" placeholder="搜索 Bench、机构或标签" autocomplete="off">
+                <kbd>/</kbd>
+            </label>
+
+            <section class="sidebar-filter-section" aria-labelledby="relevanceFilterTitle">
+                <div class="filter-label-row">
+                    <span id="relevanceFilterTitle">相关性</span>
+                    <button class="text-button" id="resetBenchFilters" type="button">清除</button>
+                </div>
+                <div class="filter-pills" id="relevanceFilters" role="group" aria-label="按相关性筛选">
+                    <button class="filter-pill active" type="button" data-relevance="" aria-pressed="true">全部</button>
+                    <button class="filter-pill" type="button" data-relevance="直接竞品" aria-pressed="false">直接竞品</button>
+                    <button class="filter-pill" type="button" data-relevance="相邻产物" aria-pressed="false">相邻产物</button>
+                    <button class="filter-pill" type="button" data-relevance="上游能力" aria-pressed="false">上游能力</button>
+                </div>
+            </section>
+
+            <label class="sidebar-select">
+                <span>最终交付物</span>
+                <select id="deliverableFilter">
+                    <option value="">全部形态</option>
+                    <option value="pdf">PDF</option>
+                    <option value="presentation">PPT / Slides</option>
+                    <option value="spreadsheet">Excel / Sheet</option>
+                    <option value="document">Word / Document</option>
+                    <option value="html">HTML / Web</option>
+                    <option value="image">Image</option>
+                    <option value="data_other">Data / Other</option>
+                    <option value="text">QA / Text</option>
+                </select>
+            </label>
+
+            <div class="bench-groups" id="benchGroups" aria-live="polite"></div>
+            <div class="sidebar-footer">
+                <span class="sidebar-footer-dot"></span>
+                <p>目录与题库解耦加载。外部资源不会自动请求。</p>
+            </div>
+        </aside>
+
+        <main class="main-content" id="mainContent" tabindex="-1">
+            <section class="catalog-home" id="catalogHome" aria-labelledby="catalogTitle">
+                <div class="catalog-hero">
+                    <div class="catalog-hero-copy">
+                        <div class="eyebrow"><span></span>PUBLIC RESEARCH INDEX · PUBLISHED ARTIFACT MIRRORS</div>
+                        <h2 id="catalogTitle">
+                            <span class="hero-title-line">仔细看看每个TASK都在说怎么个事，</span>
+                            <span class="hero-title-line">然后琢磨VERIFIER设计和代码是咋写的</span>
+                        </h2>
+                        <p>
+                            这里不限于 PDF。目录同时覆盖 Office、Web、图像与真实知识工作交付，
+                            并把“和 PDF Ops 有多像”与“外部影响力有多大”分成两条独立轴线。
+                        </p>
+                        <div class="hero-actions">
+                            <button class="primary-button" id="exploreFirstBench" type="button">打开首个 Bench</button>
+                            <button class="secondary-button" id="jumpToAudit" type="button">查看收录审计</button>
+                        </div>
+                    </div>
+                    <div class="catalog-signal" aria-label="覆盖 PDF、Excel、PPT 和 HTML 等交付物">
+                        <div class="format-cluster" aria-hidden="true">
+                            <span class="format-card format-card-pdf">
+                                <svg viewBox="0 0 48 48"><path d="M13 5h15l8 8v30H13z"></path><path d="M28 5v9h8"></path><path d="M18 24h13M18 30h13M18 36h8"></path></svg>
+                                <strong>PDF</strong>
+                                <small>FIXED DOC</small>
+                            </span>
+                            <span class="format-card format-card-xls">
+                                <svg viewBox="0 0 48 48"><rect x="7" y="8" width="34" height="32" rx="3"></rect><path d="M7 19h34M7 29h34M19 8v32M31 8v32"></path></svg>
+                                <strong>Excel</strong>
+                                <small>WORKBOOK</small>
+                            </span>
+                            <span class="format-card format-card-ppt">
+                                <svg viewBox="0 0 48 48"><rect x="7" y="8" width="34" height="27" rx="3"></rect><path d="M15 27V17h8a5 5 0 0 1 0 10zM24 35v6M17 41h14"></path></svg>
+                                <strong>PPT</strong>
+                                <small>SLIDE DECK</small>
+                            </span>
+                            <span class="format-card format-card-html">
+                                <svg viewBox="0 0 48 48"><rect x="5" y="8" width="38" height="32" rx="4"></rect><path d="M5 16h38M19 23l-6 5 6 5M29 23l6 5-6 5"></path></svg>
+                                <strong>HTML</strong>
+                                <small>LIVE WEB</small>
+                            </span>
+                        </div>
+                        <div class="signal-caption">
+                            <span>MONITORING SURFACE</span>
+                            <strong id="heroTrackedCount">— tracked units</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <section class="catalog-stats" id="catalogStats" aria-label="目录统计"></section>
+
+                <section class="catalog-section" aria-labelledby="influenceOverviewTitle">
+                    <div class="section-head">
+                        <div>
+                            <span class="section-kicker">EXTERNAL INFLUENCE</span>
+                            <h2 id="influenceOverviewTitle">四个影响力梯队</h2>
+                        </div>
+                        <p>排序只表达外部采用情况；任务相关性由卡片上的第二枚徽标单独表达。</p>
+                    </div>
+                    <div class="tier-overview" id="tierOverview"></div>
+                </section>
+
+                <details class="catalog-section kb-coverage-section" id="knowledgeCoverage">
+                    <summary>
+                        <span class="kb-coverage-summary-copy">
+                            <span class="section-kicker">KNOWLEDGE BASE COVERAGE · 22 FAMILIES</span>
+                            <strong>知识库 Bench 收录边界</strong>
+                            <small>默认折叠；展开查看公开分母、许可、未收录原因与官方入口。</small>
+                        </span>
+                        <span class="kb-coverage-summary-meta">
+                            <span id="knowledgeCoverageStatus">正在读取公开审计</span>
+                            <span class="summary-plus" aria-hidden="true">+</span>
+                        </span>
+                    </summary>
+                    <div class="kb-coverage-body">
+                        <div class="kb-coverage-intro">
+                            <p>
+                                分子由当前 <code>catalog.json</code> 中匹配到的 Bench 实时汇总；分母只计算可合法索引的公开范围。
+                                闭源、无许可、gated 或论文尚未放出的部分不会生成虚假题目卡片。
+                            </p>
+                            <span>所有外链均需主动点击，页面不会自动请求外部站点。</span>
+                        </div>
+                        <div class="kb-coverage-stats" id="knowledgeCoverageStats" aria-label="知识库收录统计"></div>
+                        <div class="coverage-collision-grid" id="coverageCollisionGrid" aria-label="易混淆 benchmark 边界"></div>
+                        <div class="kb-coverage-table-wrap">
+                            <table class="kb-coverage-table">
+                                <thead>
+                                    <tr>
+                                        <th>Benchmark family</th>
+                                        <th>处置状态</th>
+                                        <th>站内镜像 / 公开</th>
+                                        <th>许可与访问边界</th>
+                                        <th>原因与下一步</th>
+                                        <th>官方入口</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="knowledgeCoverageTableBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="kb-coverage-cards" id="knowledgeCoverageCards" aria-label="移动端知识库收录卡片"></div>
+                    </div>
+                </details>
+
+                <section class="catalog-section audit-section" id="coverageAudit" aria-labelledby="coverageAuditTitle">
+                    <div class="section-head">
+                        <div>
+                            <span class="section-kicker">COVERAGE AUDIT</span>
+                            <h2 id="coverageAuditTitle">为什么有些 Bench 仍然只显示少量条目</h2>
+                        </div>
+                        <p>少量条目不自动等于闭源：可能是公开子集、协议单元，也可能只是统计单位不是“任务”。</p>
+                    </div>
+                    <div class="audit-summary" id="auditSummary"></div>
+                    <div class="audit-table-wrap">
+                        <table class="audit-table">
+                            <thead>
+                                <tr>
+                                    <th>Benchmark</th>
+                                    <th>官方规模</th>
+                                    <th>当前公开情况</th>
+                                    <th>当前少量原因</th>
+                                    <th>可扩范围</th>
+                                </tr>
+                            </thead>
+                            <tbody id="auditTableBody"></tbody>
+                        </table>
+                    </div>
+                </section>
+            </section>
+            <section class="ingestion-workspace hidden" id="ingestionWorkspace" aria-hidden="true"></section>
+
+            <section class="bench-workspace hidden" id="benchWorkspace" aria-live="polite">
+                <header class="bench-hero" id="benchHero"></header>
+
+                <details class="bench-audit-card" id="benchAuditCard">
+                    <summary>
+                        <span><span class="summary-plus" aria-hidden="true">+</span> 收录与开放性说明</span>
+                        <span class="summary-caption" id="benchAuditCaption"></span>
+                    </summary>
+                    <div class="bench-audit-body" id="benchAuditBody"></div>
+                </details>
+
+                <section class="task-browser" aria-labelledby="taskBrowserTitle">
+                    <div class="task-toolbar">
+                        <div>
+                            <span class="section-kicker">TASK CATALOG</span>
+                            <h2 id="taskBrowserTitle">任务与评测单元</h2>
+                        </div>
+                        <div class="task-toolbar-controls">
+                            <label class="task-search">
+                                <span class="visually-hidden">搜索任务</span>
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.3-4.3m2.3-5.2a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"></path></svg>
+                                <input id="taskSearch" type="search" placeholder="搜索题目、ID、类别或要求" autocomplete="off">
+                            </label>
+                            <label class="compact-select">
+                                <span class="visually-hidden">按类别筛选</span>
+                                <select id="taskCategoryFilter"><option value="">全部类别</option></select>
+                            </label>
+                            <label class="compact-select">
+                                <span class="visually-hidden">按交付物筛选</span>
+                                <select id="taskDeliverableFilter"><option value="">全部产物</option></select>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="task-variant-row hidden" id="taskVariantRow">
+                        <span>OfficeQA 版本</span>
+                        <div class="task-variant-filters" id="taskVariantFilters" role="group" aria-label="筛选 OfficeQA 题目版本"></div>
+                    </div>
+                    <div class="task-result-row">
+                        <p id="taskResultSummary">—</p>
+                        <span id="renderModeLabel">按批渲染</span>
+                    </div>
+
+                    <div class="task-layout">
+                        <div class="task-list-pane">
+                            <div class="task-list" id="taskList"></div>
+                            <div class="task-sentinel" id="taskSentinel" aria-hidden="true"></div>
+                            <button class="load-more-button hidden" id="loadMoreTasks" type="button">继续显示</button>
+                            <div class="empty-state hidden" id="taskEmptyState">
+                                <span>0</span>
+                                <h3>没有匹配的任务</h3>
+                                <p>换一个关键词、类别或交付物筛选。</p>
+                            </div>
+                        </div>
+
+                        <article class="task-inspector" id="taskInspector">
+                            <div class="inspector-placeholder">
+                                <span class="placeholder-mark">TASK</span>
+                                <h3>选择左侧任务查看完整拆解</h3>
+                                <p>任务要求、输入、Verifier 与站内产物预览会在这里展开。</p>
+                            </div>
+                        </article>
+                    </div>
+                </section>
+            </section>
+
+            <section class="fatal-state hidden" id="fatalState" aria-live="assertive">
+                <span class="fatal-mark">!</span>
+                <h2>目录暂时没有加载成功</h2>
+                <p id="fatalMessage">请检查数据文件后重试。</p>
+                <button class="primary-button" id="fatalRetry" type="button">重新读取目录</button>
+            </section>
+        </main>
+    </div>
+
+    <div class="loading-layer hidden" id="loadingLayer" role="status" aria-live="polite" aria-atomic="true">
+        <div class="loading-card">
+            <div class="loader-character" aria-hidden="true">
+                <span class="loader-face"><i></i><i></i><b></b></span>
+                <span class="loader-paper loader-paper-one">PDF</span>
+                <span class="loader-paper loader-paper-two">XLS</span>
+                <span class="loader-paper loader-paper-three">WEB</span>
+            </div>
+            <span class="loading-kicker" id="loadingKicker">CATALOG</span>
+            <h2 id="loadingTitle">正在打开评测目录</h2>
+            <p id="loadingMessage">先读取轻量索引，再按需展开题库。</p>
+            <div class="progress-track" id="progressTrack" aria-hidden="true">
+                <span id="progressBar"></span>
+            </div>
+            <div class="progress-meta">
+                <strong id="progressValue">准备中</strong>
+                <span id="progressBytes"></span>
+            </div>
+            <button class="retry-button hidden" id="loadingRetry" type="button">再试一次</button>
+        </div>
+    </div>
+
+    <template id="benchButtonTemplate">
+        <button class="bench-button" type="button">
+            <span class="bench-button-main">
+                <strong></strong>
+                <small></small>
+            </span>
+            <span class="bench-button-meta"></span>
+        </button>
+    </template>
+    <script src="public-config.js" defer></script>
+    <script src="app.js" defer></script>
+</body>
+</html>

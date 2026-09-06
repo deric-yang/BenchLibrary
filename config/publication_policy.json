@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "policy_id": "kw-bench-library-public-v1",
+  "description": "Public-internet publication policy. Only explicitly listed benchmark data may enter the export.",
+  "expected_full_record_count": 7586,
+  "pinned_source_sha256": {
+    "assets/mirror_index.json": "60a3cc53bf5726401fbd956dfc49c6c0ba5a1a873762b1b16fa8ae86fd3e7712",
+    "assets/preview_index.json": "d4ba96673d294ebc55e67d29c791b93a8f76620334764608df4978813e3f185b",
+    "assets/verifier_source_index.json": "cbfa7942dddb327da35f7633bbad79ba45287ded8e0afedb194df2f73b663b13",
+    "data/benches/aa-briefcase.json": "92315e8be9930e49629af5b2dfa3bc51d44586f6d2a898294dfb597f81b3d83d",
+    "data/benches/agents-last-exam.json": "5d3b74b5183a622c2dec620b1f7201906ec941c50d1b79e234ae86710b6ff053",
+    "data/benches/apex-accounting.json": "dc864240793f073c7ded47bc93cd2ae2fd9fc2d30353f3be87458f69eef2c595",
+    "data/benches/apex-agents.json": "f4d443dfac86d1df177a51f32dbd908b98b1013a1eb3fc347f0de28000cc4f4e",
+    "data/benches/automationbench.json": "326ba5a48948f81628ac5f70f1b8e3bfab88c46400f11332019237fd0a3d68fd",
+    "data/benches/deepresearch-bench.json": "7bfac859d4f8fcbfa12b82737cf0e121101be6086d2af008cbcda2a6ef781ceb",
+    "data/benches/docops.json": "1cddccc0f3ca2a8946b812a858c9a914cec49d052e79bd9965666f9c9631f7ed",
+    "data/benches/draco.json": "68c9967fa7c5cbfe9cfc8949bf7dff67e1c491c98963006e57e610d379f319b2",
+    "data/benches/enterpriseops-gym.json": "07bc8414db797297fb4fdb558db7d054222d084716032e95b95b49427e34d5cd",
+    "data/benches/gaia2.json": "53800043cc3a6c8bca6738651aeede540f09bd174d9df551e161e8880d10631b",
+    "data/benches/gdp-pdf.json": "8d755d863ef6accdbdce5d48d9ad71c2bd6598be84a317aa7fa01f8c6384cf44",
+    "data/benches/handbook-md.json": "8d0f245993f3d7d4415ba683a7941bd431e047a47b1da98e75f7ff1e27e942ae",
+    "data/benches/jobbench.json": "f7f9ab94bd34f4e0db3bc6d9836cf0851786a6fa21520e06766902d72b8d35ac",
+    "data/benches/legal-agent-benchmark.json": "492547627217e71da9b281fa4d5a301487e7aa1f262b2146043250716a9ceda7",
+    "data/benches/officebench.json": "919f5c1c48d5809b784c3c5ec1952f5e4bfbc5b4eacf41da9061584cecd49c8b",
+    "data/benches/omegause-officeval.json": "eeca1daf6f7fe9f06a94066a930388910099129ff89e683fa6040ef9cf7163ab",
+    "data/benches/parsebench.json": "0a32db112aeef3715274481c8e6ecc2397a4b956f8a15cfccbdb8bacfd9304f8",
+    "data/benches/ppt-eval.json": "2f9879f8aec74b5f8817b2709bc31a3afacf39bdd575b1824684f704ce13222c",
+    "data/benches/remote-labor-index.json": "132a56087ef04ee345c772af27843c80bbfebd3045a7076e3e76247eabaac08b",
+    "data/benches/researchrubrics.json": "9586e0e6ba522ae74b58eda25e227d96287d96709058b1b2afd2f97d7497080e",
+    "data/benches/skillsbench.json": "ff4f8b9d342ca01cab3fe13b43ea46b11abe4e1500d1dc71ff89831005069f6f",
+    "data/benches/spreadsheetbench-2.json": "b9a50a115e9b18942893f0d395d491db28f277aa9609e5db6f5cf30ae8517a27",
+    "data/benches/spreadsheetbench-v1.json": "6f459142263b61f02797e2db6632fec991e77c176b38c36b64b91f2dfb8705d8",
+    "data/benches/tau3-banking.json": "b9c1166f222ad2fd20d98191875ac98feaffa7caa6439f6080f4290d5e37030b",
+    "data/benches/the-agent-company.json": "342e63387469631467b92c42cfa943ea3db40ba7df0b387b81e444a3118d0883",
+    "data/catalog.json": "3d19437e74d3779a4ae4503cee034fd92bc695359eb1a94aa6d48fec04271848"
+  },
+  "full": {
+    "aa-briefcase": {
+      "expected_records": 4,
+      "reason_zh": "仅发布已公开并采用 Apache-2.0 许可的 AA-Briefcase-Lite 四题；不包含正式私有榜单题。"
+    },
+    "agents-last-exam": {
+      "expected_records": 152,
+      "reason_zh": "公开 benchmark data 采用 CC BY 4.0；七项需单独授权的软件运行时只保留公开元数据。"
+    },
+    "apex-agents": {
+      "expected_records": 480,
+      "reason_zh": "固定 revision 的公开任务、输入、gold 与安全预览按 CC BY 4.0 发布；不发布 world ZIP。"
+    },
+    "apex-accounting": {
+      "expected_records": 10,
+      "reason_zh": "仅发布 CC BY 4.0 的十题 public dev sample；不包含 160 题闭源 scored set。"
+    },
+    "automationbench": {
+      "expected_records": 800,
+      "reason_zh": "MIT 许可的公开任务与静态安全产物。"
+    },
+    "deepresearch-bench": {
+      "expected_records": 100,
+      "reason_zh": "固定 revision 下按 Apache-2.0 发布的公开任务和 verifier 设计。"
+    },
+    "docops": {
+      "expected_records": 210,
+      "reason_zh": "Apache-2.0 许可的公开任务、附件与 verifier。"
+    },
+    "draco": {
+      "expected_records": 100,
+      "reason_zh": "MIT 许可的公开任务和评测协议。"
+    },
+    "enterpriseops-gym": {
+      "expected_records": 649,
+      "reason_zh": "Apache-2.0 许可的公开任务；导出器会递归脱敏凭据字段并拦截强凭据特征。"
+    },
+    "gaia2": {
+      "expected_records": 800,
+      "reason_zh": "公开数据按 CC BY 4.0 发布，同时保留 Llama 与第三方内容条款提示。"
+    },
+    "gdp-pdf": {
+      "expected_records": 100,
+      "reason_zh": "MIT 许可且仅作 evaluation 使用的公开任务和 PDF。"
+    },
+    "handbook-md": {
+      "expected_records": 65,
+      "reason_zh": "Apache-2.0 许可的公开任务、知识文件与 verifier。"
+    },
+    "jobbench": {
+      "expected_records": 128,
+      "reason_zh": "公开数据卡标注 MIT，评测仓库为 Apache-2.0；固定 revision 全量发布。"
+    },
+    "legal-agent-benchmark": {
+      "expected_records": 1760,
+      "reason_zh": "MIT 许可的公开任务及其 verifier 资料。"
+    },
+    "ppt-eval": {
+      "expected_records": 120,
+      "reason_zh": "代码为 MIT；源 deck 逐件保留 Public Domain、CC0 或 CC BY 4.0 归属信息。"
+    },
+    "officebench": {
+      "expected_records": 300,
+      "reason_zh": "Apache-2.0 许可的公开 Office 任务与产物。"
+    },
+    "omegause-officeval": {
+      "expected_records": 100,
+      "reason_zh": "Apache-2.0 许可的公开任务与 Office 产物。"
+    },
+    "parsebench": {
+      "expected_records": 5,
+      "reason_zh": "Apache-2.0 许可的公开解析任务及样例产物。"
+    },
+    "remote-labor-index": {
+      "expected_records": 10,
+      "reason_zh": "Apache-2.0 许可的 public dataset 全量。"
+    },
+    "researchrubrics": {
+      "expected_records": 101,
+      "reason_zh": "MIT 许可的公开任务与 rubric。"
+    },
+    "skillsbench": {
+      "expected_records": 87,
+      "reason_zh": "Apache-2.0 的默认 v1.1 榜单任务；不混入 tasks-extra 的凭据或兼容性任务。"
+    },
+    "spreadsheetbench-2": {
+      "expected_records": 321,
+      "reason_zh": "数据集为 CC BY-SA 4.0，评测代码为 MIT；发布固定 revision 全量。"
+    },
+    "spreadsheetbench-v1": {
+      "expected_records": 912,
+      "reason_zh": "CC BY-SA 4.0 许可的 V1 公开任务全量。"
+    },
+    "the-agent-company": {
+      "expected_records": 175,
+      "reason_zh": "MIT 许可的公开任务及其静态资料。"
+    },
+    "tau3-banking": {
+      "expected_records": 97,
+      "reason_zh": "MIT 许可；仅发布公开 base split、固定知识文档与公开 evaluator。"
+    }
+  },
+  "metadata_only": {
+    "artifactsbench": {
+      "reason_zh": "官方仓库、License.txt 与 Hugging Face metadata 的许可信号冲突；澄清前只发布介绍、许可提示和官方链接。"
+    },
+    "workbuddybench-office": {
+      "reason_zh": "Tencent custom license 含地域限制；获得明确公网再分发授权前只发布介绍和官方链接。"
+    }
+  },
+  "link_only": {
+    "arena-webdev": {
+      "reason_zh": "LMArena 自定义条款明确禁止复制、嵌入、托管或转移数据；公网仅保留第一方入口。"
+    },
+    "gdpval": {
+      "reason_zh": "官方数据卡没有声明数据许可；公网仅保留方法介绍、规模口径与第一方链接。"
+    },
+    "officeqa": {
+      "reason_zh": "数据受 gated access 控制；不把一次性授权下载转为无人值守的公网镜像。"
+    },
+    "omnidocbench": {
+      "reason_zh": "当前快照标记为 official-link-only/non-commercial；公网只提供第一方入口。"
+    }
+  },
+  "exclude": {
+    "vals-vibe-code": {
+      "reason_zh": "完整 benchmark 为 proprietary/gated，公开 artifact 仓库在固定 revision 下也没有再分发许可。"
+    }
+  },
+  "required_root_indexes": [
+    "assets/mirror_index.json",
+    "assets/preview_index.json",
+    "assets/verifier_source_index.json"
+  ],
+  "optional_public_metadata": [
+    "data/kw_coverage.json",
+    "data/mirror_manifest.json"
+  ],
+  "forbidden_path_prefixes": [
+    "corpus/",
+    "ingestion/",
+    "work/",
+    "source-snapshots/",
+    "releases/"
+  ],
+  "forbidden_exact_paths": [
+    "assets/deploy_manifest.json",
+    "data/source_manifest.json"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kw-bench-library",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "benchlibrary.com",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./site",
+    "binding": "STATIC_ASSETS",
+    "not_found_handling": "none",
+    "run_worker_first": ["/data/*", "/assets/*"]
+  },
+  "r2_buckets": [
+    {
+      "binding": "PUBLIC_CORPUS",
+      "bucket_name": "benchlibrary-public"
+    }
+  ],
+  "vars": {
+    // Deployment switches atomically by updating this immutable R2 release id.
+    "PUBLIC_RELEASE_ID": "unpublished"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01
+    }
+  }
+}
