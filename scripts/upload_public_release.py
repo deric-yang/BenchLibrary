@@ -455,11 +455,16 @@ class PublicReleaseUploader:
         headers = self._headers(item)
         headers["Content-Length"] = str(item.size)
         headers["Content-Type"] = "application/octet-stream"
+        body: dict[str, Any]
+        if item.size == 0:
+            body = {"data": b""}
+        else:
+            body = {"data_factory": lambda: source.open("rb")}
         response = self._request_with_retry(
             "PUT",
             f"{self.endpoint}/_kwbl-upload/v1/object",
             headers=headers,
-            data_factory=lambda: source.open("rb"),
+            **body,
         )
         result = response.json()
         return "remote-skip" if result.get("skipped") else "uploaded"

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import requests
+
 from scripts.upload_public_release import (
     MultipartUploadMissing,
     PublicReleaseUploader,
@@ -295,6 +297,84 @@ class UploadManifestTest(unittest.TestCase):
             self.assertEqual(headers["X-KWBL-Content-Type"], "application/json")
             self.assertNotIn("Content-Encoding", headers)
             self.assertNotIn("Content-Type", headers)
+
+    def test_empty_direct_upload_uses_literal_body_without_chunked_encoding(self) -> None:
+        """An empty direct object must not combine length zero with a streamed body."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "empty.bin"
+            source.write_bytes(b"")
+            uploader = PublicReleaseUploader(
+                "https://example.invalid",
+                "x" * 32,
+                None,
+                root / "state.jsonl",
+                "releases/test-release/",
+            )
+            item = ReleaseFile(
+                "assets/empty.bin",
+                0,
+                hashlib.sha256(b"").hexdigest(),
+                "application/octet-stream",
+                "public, max-age=31536000, immutable",
+            )
+            captured: dict[str, Any] = {}
+
+            def capture_request(method: str, url: str, **kwargs: Any) -> FakeResponse:
+                """Capture the direct upload request without opening a connection."""
+                captured.update({"method": method, "url": url, **kwargs})
+                return FakeResponse({"ok": True, "skipped": False})
+
+            with mock.patch.object(uploader, "_request_with_retry", side_effect=capture_request):
+                self.assertEqual(uploader._put_direct(source, item), "uploaded")
+
+            self.assertEqual(captured["data"], b"")
+            self.assertNotIn("data_factory", captured)
+            prepared = requests.Request(
+                captured["method"],
+                captured["url"],
+                headers=captured["headers"],
+                data=captured["data"],
+            ).prepare()
+            self.assertEqual(prepared.headers["Content-Length"], "0")
+            self.assertNotIn("Transfer-Encoding", prepared.headers)
+
+    def test_nonempty_direct_upload_still_uses_reopenable_stream(self) -> None:
+        """Non-empty direct uploads retain a fresh file stream for every retry."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "payload.bin"
+            source.write_bytes(b"payload")
+            uploader = PublicReleaseUploader(
+                "https://example.invalid",
+                "x" * 32,
+                None,
+                root / "state.jsonl",
+                "releases/test-release/",
+            )
+            item = ReleaseFile(
+                "assets/payload.bin",
+                source.stat().st_size,
+                hashlib.sha256(source.read_bytes()).hexdigest(),
+                "application/octet-stream",
+                "public, max-age=31536000, immutable",
+            )
+            captured: dict[str, Any] = {}
+
+            def capture_request(method: str, url: str, **kwargs: Any) -> FakeResponse:
+                """Capture the direct upload request without opening a connection."""
+                captured.update({"method": method, "url": url, **kwargs})
+                return FakeResponse({"ok": True, "skipped": False})
+
+            with mock.patch.object(uploader, "_request_with_retry", side_effect=capture_request):
+                self.assertEqual(uploader._put_direct(source, item), "uploaded")
+
+            self.assertNotIn("data", captured)
+            data_factory = captured["data_factory"]
+            with data_factory() as first_stream:
+                self.assertEqual(first_stream.read(), b"payload")
+            with data_factory() as second_stream:
+                self.assertEqual(second_stream.read(), b"payload")
 
     def test_multipart_interruption_resumes_only_missing_parts(self) -> None:
         """Acknowledged part ETags survive a process restart and are not uploaded twice."""
