@@ -1652,6 +1652,13 @@ class PublicReleaseExporter:
             raise ExportError("Process pool results do not match the exported file set")
         for relative_path, _ in paths:
             file_size, digest = results_by_path[relative_path]
+            exception = self.upstream_integrity_exceptions.get(relative_path)
+            if exception is not None and (
+                file_size != exception["size_bytes"] or digest != exception["sha256"]
+            ):
+                raise ExportError(
+                    f"Upstream integrity exception changed during export: {relative_path}"
+                )
             r2_key = f"releases/{self.release_id}/{relative_path}"
             if len(r2_key.encode("utf-8")) > 1024:
                 raise ExportError(f"R2 object key exceeds 1,024 UTF-8 bytes: {relative_path}")
@@ -1662,8 +1669,7 @@ class PublicReleaseExporter:
                 "size": file_size,
             }
             entry.update(_content_metadata(relative_path))
-            if relative_path in self.upstream_integrity_exceptions:
-                exception = self.upstream_integrity_exceptions[relative_path]
+            if exception is not None:
                 entry["integrity_status"] = "upstream-anomaly-pinned-v1"
                 entry["integrity_handling"] = exception["handling"]
                 entry["public_note_zh"] = exception["reason_zh"]

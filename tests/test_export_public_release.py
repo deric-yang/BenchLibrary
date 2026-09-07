@@ -17,6 +17,7 @@ from scripts.export_public_release import (
     ExportError,
     PublicReleaseExporter,
     SecurityError,
+    _hash_release_file,
     _sha256_and_scan,
     _text_line_count,
     sanitize_json,
@@ -835,6 +836,43 @@ class PublicReleaseExporterTest(unittest.TestCase):
 
         with self.assertRaisesRegex(SecurityError, "Credential-shaped content"):
             _sha256_and_scan(package, "assets/mirrors/full-bench/credential.zip", digest)
+
+    def test_integrity_exception_is_rechecked_after_parallel_hashing(self) -> None:
+        """A pinned anomaly cannot change between the preflight and final manifest scan."""
+        path = "assets/mirrors/full-bench/task-1/upstream.wav"
+        payload = self.source / path
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(b"RIFFpinned-upstream-bytes")
+        digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+        full_shard_path = self.source / "data/benches/full-bench.json"
+        full_shard = json.loads(full_shard_path.read_text(encoding="utf-8"))
+        full_shard["tasks"][0]["download_path"] = path
+        _write_json(full_shard_path, full_shard)
+        self.policy["upstream_integrity_exceptions"] = {
+            path: {
+                "handling": "truncated_media_download",
+                "reason_zh": "fixture truncated media",
+                "sha256": digest,
+                "size_bytes": payload.stat().st_size,
+            }
+        }
+        self._refresh_policy_pins()
+        def changed_result(item: tuple[str, Path, str | None]) -> tuple[str, int, str]:
+            """Simulate a source mutation after policy preflight but during final hashing."""
+            relative_path, source_path, opaque_sha256 = item
+            if relative_path == path:
+                return relative_path, source_path.stat().st_size, "0" * 64
+            return _hash_release_file((relative_path, source_path, opaque_sha256))
+
+        with mock.patch(
+            "scripts.export_public_release.concurrent.futures.ProcessPoolExecutor"
+        ) as process_pool:
+            executor = process_pool.return_value.__enter__.return_value
+            executor.map.side_effect = lambda function, items, chunksize: [
+                changed_result(item) for item in items
+            ]
+            with self.assertRaisesRegex(ExportError, "changed during export"):
+                self._export()
 
 
 if __name__ == "__main__":
