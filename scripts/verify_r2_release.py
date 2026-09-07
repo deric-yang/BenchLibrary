@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import mimetypes
 import re
 import sys
 from dataclasses import dataclass
@@ -48,6 +49,10 @@ class ObjectIdentity:
     key: str
     size: int
     sha256: str
+    content_type: str
+    cache_control: str
+    content_encoding: str
+    content_disposition: str
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,54 @@ def _safe_relative_path(value: Any, label: str) -> str:
     return value
 
 
+def _default_cache_control(path: str) -> str:
+    """Mirror the upload client's conservative metadata defaults."""
+    if path == "data/catalog.json" or path.endswith("_index.json") or path.endswith(
+        "public_manifest.json"
+    ):
+        return "public, max-age=300, must-revalidate"
+    if path.startswith("site/"):
+        return "public, max-age=300, must-revalidate"
+    if path.endswith(".html"):
+        return "no-store"
+    return "public, max-age=31536000, immutable"
+
+
+def _manifest_http_metadata(raw: dict[str, Any], path: str) -> tuple[str, str, str, str]:
+    """Resolve the exact HTTP metadata that the upload client will store."""
+    content_type = str(
+        raw.get("content_type")
+        or mimetypes.guess_type(path)[0]
+        or "application/octet-stream"
+    )
+    cache_control = str(raw.get("cache_control") or _default_cache_control(path))
+    return (
+        content_type,
+        cache_control,
+        str(raw.get("content_encoding") or ""),
+        str(raw.get("content_disposition") or ""),
+    )
+
+
+def _inventory_http_metadata(raw: dict[str, Any], key: str) -> tuple[str, str, str, str]:
+    """Load a complete normalized R2 HTTP metadata record."""
+    metadata = raw.get("http_metadata")
+    if metadata is None:
+        metadata = raw.get("httpMetadata")
+    if not isinstance(metadata, dict):
+        raise VerificationError(f"R2 object is missing HTTP metadata: {key}")
+    fields = (
+        "content_type",
+        "cache_control",
+        "content_encoding",
+        "content_disposition",
+    )
+    values = tuple(metadata.get(field, "") for field in fields)
+    if any(not isinstance(value, str) for value in values):
+        raise VerificationError(f"R2 object has invalid HTTP metadata: {key}")
+    return values
+
+
 def _manifest_object(raw: Any, prefix: str, index: int) -> ObjectIdentity:
     """Validate one regular file entry from the public release manifest."""
     if not isinstance(raw, dict):
@@ -108,7 +161,7 @@ def _manifest_object(raw: Any, prefix: str, index: int) -> ObjectIdentity:
         raise VerificationError(f"Manifest R2 key does not match release prefix: {path}")
     size = _nonnegative_integer(raw.get("size"), f"Manifest size for {path}")
     digest = _sha256(raw.get("sha256"), f"Manifest SHA-256 for {path}")
-    return ObjectIdentity(expected_key, size, digest)
+    return ObjectIdentity(expected_key, size, digest, *_manifest_http_metadata(raw, path))
 
 
 def load_expected_release(path: Path) -> ExpectedRelease:
@@ -155,6 +208,10 @@ def load_expected_release(path: Path) -> ExpectedRelease:
         self_key,
         len(manifest_bytes),
         hashlib.sha256(manifest_bytes).hexdigest(),
+        "application/json; charset=utf-8",
+        "public, max-age=300, must-revalidate",
+        "",
+        "",
     )
     return ExpectedRelease(release_id, prefix, objects)
 
@@ -173,7 +230,7 @@ def _inventory_object(raw: Any, prefix: str, index: int) -> ObjectIdentity:
     if not isinstance(custom_metadata, dict):
         raise VerificationError(f"R2 object is missing custom metadata: {key}")
     digest = _sha256(custom_metadata.get("sha256"), f"R2 sha256 metadata for {key}")
-    return ObjectIdentity(key, size, digest)
+    return ObjectIdentity(key, size, digest, *_inventory_http_metadata(raw, key))
 
 
 def load_complete_inventory(path: Path, expected_prefix: str) -> dict[str, ObjectIdentity]:
@@ -245,6 +302,27 @@ def verify_release(manifest_path: Path, inventory_path: Path) -> dict[str, Any]:
         raise VerificationError(
             f"R2 inventory has {len(hash_mismatches)} SHA-256 metadata mismatches: "
             f"{_sample_keys(hash_mismatches)}"
+        )
+    metadata_mismatches = {
+        key
+        for key in expected_keys
+        if (
+            expected.objects[key].content_type,
+            expected.objects[key].cache_control,
+            expected.objects[key].content_encoding,
+            expected.objects[key].content_disposition,
+        )
+        != (
+            actual[key].content_type,
+            actual[key].cache_control,
+            actual[key].content_encoding,
+            actual[key].content_disposition,
+        )
+    }
+    if metadata_mismatches:
+        raise VerificationError(
+            f"R2 inventory has {len(metadata_mismatches)} HTTP metadata mismatches: "
+            f"{_sample_keys(metadata_mismatches)}"
         )
 
     expected_bytes = sum(item.size for item in expected.objects.values())

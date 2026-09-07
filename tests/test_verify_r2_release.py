@@ -29,6 +29,8 @@ class R2ReleaseVerificationTest(unittest.TestCase):
             "release_id": self.release_id,
             "files": [
                 {
+                    "cache_control": "public, max-age=300, must-revalidate",
+                    "content_type": "application/json; charset=utf-8",
                     "path": "data/catalog.json",
                     "r2_key": f"{self.prefix}data/catalog.json",
                     "sha256": self.catalog_hash,
@@ -65,11 +67,23 @@ class R2ReleaseVerificationTest(unittest.TestCase):
                 "key": f"{self.prefix}data/catalog.json",
                 "size": len(self.catalog_bytes),
                 "custom_metadata": {"sha256": self.catalog_hash},
+                "http_metadata": {
+                    "cache_control": "public, max-age=300, must-revalidate",
+                    "content_disposition": "",
+                    "content_encoding": "",
+                    "content_type": "application/json; charset=utf-8",
+                },
             },
             {
                 "key": f"{self.prefix}data/public_manifest.json",
                 "size": len(manifest_bytes),
                 "customMetadata": {"sha256": hashlib.sha256(manifest_bytes).hexdigest()},
+                "http_metadata": {
+                    "cache_control": "public, max-age=300, must-revalidate",
+                    "content_disposition": "",
+                    "content_encoding": "",
+                    "content_type": "application/json; charset=utf-8",
+                },
             },
         ]
         return {
@@ -134,6 +148,16 @@ class R2ReleaseVerificationTest(unittest.TestCase):
         self._write_inventory(inventory)
 
         with self.assertRaisesRegex(VerificationError, "SHA-256 metadata mismatches"):
+            verify_release(self.manifest_path, self.inventory_path)
+
+    def test_rejects_content_disposition_mismatch(self) -> None:
+        """A lost download-only attachment policy cannot pass final verification."""
+        self.manifest["files"][0]["content_disposition"] = "attachment"
+        self._write_manifest()
+        inventory = self._inventory()
+        self._write_inventory(inventory)
+
+        with self.assertRaisesRegex(VerificationError, "HTTP metadata mismatches"):
             verify_release(self.manifest_path, self.inventory_path)
 
     def test_rejects_duplicate_inventory_key(self) -> None:

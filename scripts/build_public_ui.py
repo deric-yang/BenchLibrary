@@ -10,16 +10,165 @@ from __future__ import annotations
 
 import argparse
 import re
-import shutil
 from pathlib import Path
 
 
-BLOCKED_PUBLIC_TEXT = (
-    "Contributor Key",
-    "HF Token",
-    ":8913",
-    "ingestion.js",
+BLOCKED_PUBLIC_PATTERNS = (
+    ("internal intake identifier", re.compile(r"ingestion", re.IGNORECASE)),
+    ("contributor credential", re.compile(r"contributor", re.IGNORECASE)),
+    ("manual-input state", re.compile(r"needs(?:_|-)input", re.IGNORECASE)),
+    ("HF token", re.compile(r"\bhf[\s_-]*token\b", re.IGNORECASE)),
+    ("Hugging Face token", re.compile(r"hugging\s+face\s+token", re.IGNORECASE)),
+    ("internal API port", re.compile(r":8913\b")),
 )
+
+NESTED_CSS_AT_RULES = (
+    "@container",
+    "@document",
+    "@keyframes",
+    "@layer",
+    "@media",
+    "@scope",
+    "@supports",
+    "@-webkit-keyframes",
+)
+
+
+def find_blocked_public_text(text: str) -> tuple[str, str] | None:
+    """Return the first blocked label and source spelling in ``text``."""
+    for label, pattern in BLOCKED_PUBLIC_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return label, match.group(0)
+    return None
+
+
+def find_css_open_brace(source: str, start: int) -> int | None:
+    """Find the next CSS block opener outside strings and comments."""
+    quote = ""
+    escaped = False
+    in_comment = False
+    index = start
+    while index < len(source):
+        char = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if in_comment:
+            if char == "*" and following == "/":
+                in_comment = False
+                index += 2
+                continue
+        elif quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char == "/" and following == "*":
+            in_comment = True
+            index += 2
+            continue
+        elif char in ('"', "'"):
+            quote = char
+        elif char == "{":
+            return index
+        index += 1
+    return None
+
+
+def find_css_close_brace(source: str, opening: int) -> int:
+    """Find the closing brace paired with ``opening`` in CSS source."""
+    quote = ""
+    escaped = False
+    in_comment = False
+    depth = 0
+    index = opening
+    while index < len(source):
+        char = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if in_comment:
+            if char == "*" and following == "/":
+                in_comment = False
+                index += 2
+                continue
+        elif quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char == "/" and following == "*":
+            in_comment = True
+            index += 2
+            continue
+        elif char in ('"', "'"):
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    raise ValueError(f"unclosed CSS block at offset {opening}")
+
+
+def css_indent(leading: str) -> str:
+    """Return the indentation encoded at the end of leading whitespace."""
+    if "\n" not in leading:
+        return leading
+    return leading.rsplit("\n", 1)[1]
+
+
+def sanitize_css_scope(source: str) -> str:
+    """Remove private selectors from one CSS rule scope."""
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(source):
+        opening = find_css_open_brace(source, cursor)
+        if opening is None:
+            output.append(source[cursor:])
+            break
+        closing = find_css_close_brace(source, opening)
+        prelude = source[cursor:opening]
+        leading_match = re.match(r"\s*", prelude)
+        leading = leading_match.group(0) if leading_match else ""
+        header = prelude[len(leading):].strip()
+        body = source[opening + 1:closing]
+        if not header:
+            raise ValueError(f"CSS block at offset {opening} has no selector")
+
+        lowered_header = header.lower()
+        if lowered_header.startswith("@"):
+            nested = lowered_header.startswith(NESTED_CSS_AT_RULES)
+            sanitized_body = sanitize_css_scope(body) if nested else body
+            output.append(f"{leading}{header} {{{sanitized_body}}}")
+        else:
+            selectors = [selector.strip() for selector in header.split(",")]
+            public_selectors = [
+                selector
+                for selector in selectors
+                if selector and find_blocked_public_text(selector) is None
+            ]
+            if public_selectors:
+                separator = ",\n" + css_indent(leading)
+                selector_group = separator.join(public_selectors)
+                output.append(f"{leading}{selector_group} {{{body}}}")
+            else:
+                output.append(leading.rstrip(" \t"))
+        cursor = closing + 1
+    return "".join(output)
+
+
+def build_styles(source: str) -> str:
+    """Remove all private intake selectors from the shared stylesheet."""
+    styles = sanitize_css_scope(source)
+    blocked = find_blocked_public_text(styles)
+    if blocked:
+        label, spelling = blocked
+        raise ValueError(f"public CSS contains blocked {label}: {spelling}")
+    return styles
 
 
 def replace_once(text: str, old: str, new: str, *, label: str) -> str:
@@ -60,10 +209,7 @@ def build_index(source: str) -> str:
         r"\n\s*<section\s+class=[\"']ingestion-workspace\s+hidden[\"']\s+"
         r"id=[\"']ingestionWorkspace[\"'][^>]*>.*?</section>\s*"
         r"(?=<section\s+class=[\"']bench-workspace)",
-        (
-            "\n            <section class=\"ingestion-workspace hidden\" "
-            "id=\"ingestionWorkspace\" aria-hidden=\"true\"></section>\n\n            "
-        ),
+        "\n\n            ",
         label="ingestion workspace",
     )
     html = regex_replace_once(
@@ -105,17 +251,19 @@ def build_index(source: str) -> str:
 
 
 def build_app(source: str) -> str:
-    """Install public-mode guards without changing the catalog experience."""
+    """Physically remove the internal intake client from the public application."""
+    app = source
     app = replace_once(
-        source,
-        '"use strict";\n',
-        (
-            '"use strict";\n\n'
-            "const PUBLIC_MODE = globalThis.KW_BENCH_PUBLIC_MODE === true;\n"
-        ),
-        label="strict-mode preamble",
+        app,
+        """        "jumpToAudit", "openIngestionHome", "openIngestionSidebar", "heroTrackedCount",
+        "knowledgeCoverage", "knowledgeCoverageStatus", "ingestionWorkspace",
+        "ingestionBackButton",
+""",
+        """        "jumpToAudit", "heroTrackedCount", "knowledgeCoverage",
+        "knowledgeCoverageStatus",
+""",
+        label="private DOM registry",
     )
-
     app = replace_once(
         app,
         """    dom.openIngestionHome.addEventListener("click", () => {
@@ -128,58 +276,109 @@ def build_app(source: str) -> str:
         showCatalogHome();
     });
 """,
-        """    if (!PUBLIC_MODE) {
-        dom.openIngestionHome?.addEventListener("click", () => {
-            showIngestionWorkspace({updateLocation: true});
-        });
-        dom.openIngestionSidebar?.addEventListener("click", () => {
-            showIngestionWorkspace({updateLocation: true});
-        });
-        dom.ingestionBackButton?.addEventListener("click", () => {
-            showCatalogHome();
-        });
-    }
-""",
-        label="ingestion event bindings",
+        "",
+        label="private event bindings",
     )
-
     app = replace_once(
         app,
-        """function showIngestionWorkspace(options = {}) {
-    state.activeBenchId = "";
-""",
-        """function showIngestionWorkspace(options = {}) {
-    if (PUBLIC_MODE) {
-        showCatalogHome({
-            scroll: options.scroll,
-            updateLocation: options.updateLocation,
+        """    if (isIngestionLocation()) {
+        dom.loadingLayer.classList.add("hidden");
+        setNavStatus("loading", "目录后台加载");
+    }
+    else {
+        showLoader({
+            kicker: "CATALOG · STAGE 1 / 2",
+            title: "正在打开评测目录",
+            message: "先读取轻量索引；题库只在你选择 Bench 后加载。",
         });
+        setNavStatus("loading", "读取目录");
+    }
+""",
+        """    showLoader({
+        kicker: "CATALOG · STAGE 1 / 2",
+        title: "正在打开评测目录",
+        message: "先读取轻量索引；题库只在你选择 Bench 后加载。",
+    });
+    setNavStatus("loading", "读取目录");
+""",
+        label="private catalog-loading branch",
+    )
+    app = replace_once(
+        app,
+        """    if (isIngestionLocation()) {
+        dom.loadingLayer.classList.add("hidden");
+        setNavStatus("error", "目录暂不可用 · 接入仍可使用");
         return;
     }
-    state.activeBenchId = "";
 """,
-        label="ingestion workspace guard",
+        "",
+        label="private catalog-error branch",
     )
     app = replace_once(
         app,
-        """function isIngestionLocation() {
-    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-    return params.get("view") === "ingestion";
-}
+        """    dom.ingestionWorkspace.classList.add("hidden");
+    globalThis.KwBenchIngestion?.deactivate();
 """,
-        """function isIngestionLocation() {
-    if (PUBLIC_MODE) {
-        return false;
-    }
-    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-    return params.get("view") === "ingestion";
-}
-""",
-        label="ingestion location guard",
+        "",
+        label="private bench-selection state",
     )
     app = replace_once(
         app,
-        """    if (view === "ingestion") {
+        (
+            '            "浏览器不会携带 Hugging Face Token；Gold answer、答案哈希与 oracle 页码"\n'
+            '                + "均未进入题库 shard、搜索索引或 Verifier 配置。",\n'
+        ),
+        (
+            '            "本站不会代用户访问受门禁保护的数据；Gold answer、答案哈希"\n'
+            '                + "与 oracle 页码均未进入题库 shard、搜索索引"\n'
+            '                + "或 Verifier 配置。",\n'
+        ),
+        label="gated-data credential copy",
+    )
+    app = replace_once(
+        app,
+        "HF 授权内网镜像 · 问题可审阅，答案已排除",
+        "授权数据 · 可公开问题可审阅，答案已排除",
+        label="gated-data heading",
+    )
+    app = replace_once(
+        app,
+        """    dom.ingestionWorkspace.classList.add("hidden");
+    dom.catalogHome.classList.remove("hidden");
+    globalThis.KwBenchIngestion?.deactivate();
+""",
+        """    dom.catalogHome.classList.remove("hidden");
+""",
+        label="private catalog-home state",
+    )
+    app = replace_once(
+        app,
+        """    dom.ingestionWorkspace.classList.add("hidden");
+""",
+        "",
+        label="private fatal-state workspace",
+    )
+    app = replace_once(
+        app,
+        """    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    if (!state.activeBenchId && params.get("view") !== "ingestion") {
+""",
+        """    if (!state.activeBenchId) {
+""",
+        label="private fatal-state location",
+    )
+    app = regex_replace_once(
+        app,
+        r"\nfunction showIngestionWorkspace\(options = \{\}\) \{.*?"
+        r"\n\}\n\nfunction isIngestionLocation\(\) \{.*?\n\}\n"
+        r"(?=\nfunction handleHashChange)",
+        "",
+        label="private workspace functions",
+    )
+    app = replace_once(
+        app,
+        """    const view = params.get("view") || "";
+    if (view === "ingestion") {
         showIngestionWorkspace({
             jobId: params.get("job") || "",
             scroll: false,
@@ -188,51 +387,24 @@ def build_app(source: str) -> str:
         return;
     }
 """,
-        """    if (view === "ingestion") {
-        if (PUBLIC_MODE) {
-            updateLocation("", "");
-            if (state.benches.length) {
-                showCatalogHome({scroll: false, updateLocation: false});
-            }
-            return;
-        }
-        showIngestionWorkspace({
-            jobId: params.get("job") || "",
-            scroll: false,
-            updateLocation: false,
-        });
-        return;
-    }
-""",
-        label="ingestion hash handling",
+        "",
+        label="private hash route",
     )
-    app = replace_once(
+    app = regex_replace_once(
         app,
-        """function updateIngestionLocation(jobId) {
-    const params = new URLSearchParams();
-""",
-        """function updateIngestionLocation(jobId) {
-    if (PUBLIC_MODE) {
-        updateLocation("", "");
-        return;
-    }
-    const params = new URLSearchParams();
-""",
-        label="ingestion history guard",
+        r"\nfunction updateIngestionLocation\(jobId\) \{.*?\n\}\n"
+        r"(?=\nfunction updateLocation)",
+        "",
+        label="private location writer",
     )
 
     public_copy = {
-        "目录暂不可用 · 接入仍可使用": "目录暂不可用",
         "本地审计文件读取失败": "公开审计文件读取失败",
         "本地镜像覆盖": "站内镜像覆盖",
         "本地审计读取失败": "公开审计读取失败",
         "正在读取本地审计": "正在读取公开审计",
         "本地 / 可索引公开": "站内镜像 / 可索引公开",
         "等待本地镜像索引": "等待站内镜像索引",
-        "HF 授权内网镜像 · 问题可审阅，答案已排除": (
-            "HF 授权数据 · 可公开问题可审阅，答案已排除"
-        ),
-        "浏览器不会携带 Hugging Face Token": "本站不会代用户访问 Hugging Face 门禁数据",
         "文件与本地预览": "文件与站内预览",
         "本站本地镜像优先": "本站镜像优先",
         "正在校验本地预览": "正在校验站内预览",
@@ -254,7 +426,6 @@ def build_app(source: str) -> str:
         ): (
             "当前没有站内配置正文；公开镜像补齐后会在此显示，而不是只给出跳转按钮。"
         ),
-        "Benchmark 接入工作台": "评测目录",
         "本地镜像已就绪": "站内镜像已就绪",
     }
     for internal_text, public_text in public_copy.items():
@@ -262,44 +433,34 @@ def build_app(source: str) -> str:
     return app
 
 
-def assert_public_output(index: str, app: str, config: str) -> None:
-    """Verify that the generated deploy surface cannot expose intake secrets."""
-    combined = "\n".join((index, app, config))
-    for blocked in BLOCKED_PUBLIC_TEXT:
-        if blocked in combined:
-            raise ValueError(f"public output contains blocked text: {blocked}")
+def assert_public_output(index: str, app: str, styles: str, config: str) -> None:
+    """Verify that no internal intake vocabulary reaches deployable assets."""
+    surfaces = {
+        "index.html": index,
+        "app.js": app,
+        "styles.css": styles,
+        "public-config.js": config,
+    }
+    for filename, content in surfaces.items():
+        blocked = find_blocked_public_text(content)
+        if blocked:
+            label, spelling = blocked
+            raise ValueError(
+                f"public {filename} contains blocked {label}: {spelling}"
+            )
 
-    forbidden_ids = (
-        "openIngestionHome",
-        "openIngestionSidebar",
-        "ingestionBackButton",
-        "ingestionForm",
-        "contributorKey",
-        "ingestionHfToken",
-    )
-    for element_id in forbidden_ids:
-        if f'id="{element_id}"' in index:
-            raise ValueError(f"public HTML contains private control: {element_id}")
-
-    placeholder = (
-        '<section class="ingestion-workspace hidden" '
-        'id="ingestionWorkspace" aria-hidden="true"></section>'
-    )
-    if index.count(placeholder) != 1:
-        raise ValueError("public HTML must retain exactly one inert workspace placeholder")
     if "KW_BENCH_PUBLIC_MODE = true" not in config:
         raise ValueError("public runtime flag is missing")
-    if "const PUBLIC_MODE" not in app or "if (PUBLIC_MODE)" not in app:
-        raise ValueError("public-mode application guards are missing")
-    if 'params.get("view") || ""' not in app or 'view === "ingestion"' not in app:
-        raise ValueError("legacy ingestion hash redirect is missing")
-    if index.find("public-config.js") > index.find("app.js"):
+    config_offset = index.find("public-config.js")
+    app_offset = index.find("app.js")
+    if config_offset < 0 or app_offset < 0 or config_offset > app_offset:
         raise ValueError("public mode must be configured before app.js")
     if "noindex" in index or "nofollow" in index:
         raise ValueError("public page still opts out of indexing")
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse source and output directory overrides from the command line."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--source",
@@ -317,6 +478,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Build and validate all public UI assets into the output directory."""
     args = parse_args()
     source_dir = args.source.resolve()
     output_dir = args.output.resolve()
@@ -332,12 +494,13 @@ def main() -> None:
 
     index = build_index((source_dir / "index.html").read_text(encoding="utf-8"))
     app = build_app((source_dir / "app.js").read_text(encoding="utf-8"))
+    styles = build_styles((source_dir / "styles.css").read_text(encoding="utf-8"))
     config = config_path.read_text(encoding="utf-8")
-    assert_public_output(index, app, config)
+    assert_public_output(index, app, styles, config)
 
     (output_dir / "index.html").write_text(index, encoding="utf-8")
     (output_dir / "app.js").write_text(app, encoding="utf-8")
-    shutil.copyfile(source_dir / "styles.css", output_dir / "styles.css")
+    (output_dir / "styles.css").write_text(styles, encoding="utf-8")
     print(f"Built public UI in {output_dir}")
 
 

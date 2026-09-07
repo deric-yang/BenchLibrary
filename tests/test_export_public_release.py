@@ -67,6 +67,7 @@ class PublicReleaseExporterTest(unittest.TestCase):
                 "data/kw_coverage.json",
                 "data/mirror_manifest.json",
             ],
+            "upstream_integrity_exceptions": {},
             "forbidden_path_prefixes": ["corpus/", "ingestion/", "work/"],
             "forbidden_exact_paths": ["assets/deploy_manifest.json", "data/source_manifest.json"],
         }
@@ -286,6 +287,14 @@ class PublicReleaseExporterTest(unittest.TestCase):
         )
         return exporter.run()
 
+    def _reference_full_dependency(self, relative_path: str) -> None:
+        """Reference one strict dependency from the full fixture shard and refresh its pin."""
+        shard_path = self.source / "data/benches/full-bench.json"
+        shard = json.loads(shard_path.read_text(encoding="utf-8"))
+        shard["tasks"][0]["catalog_url"] = relative_path
+        _write_json(shard_path, shard)
+        self._refresh_policy_pins()
+
     def test_exports_filtered_public_release_with_hardlinks(self) -> None:
         """Full data is linked, restricted benches are stubs, and indexes are filtered."""
         manifest = self._export()
@@ -322,6 +331,93 @@ class PublicReleaseExporterTest(unittest.TestCase):
         manifest_paths = {item["path"] for item in manifest["files"]}
         self.assertIn("site/app.js", manifest_paths)
         self.assertNotIn("assets/private/closed.json", manifest_paths)
+
+    def test_exports_valid_json_lines_named_json_without_rewriting(self) -> None:
+        """A JSON-suffixed JSON Lines dependency is exported byte-for-byte when clean."""
+        relative_path = "assets/mirrors/full-bench/catalog/records.json"
+        source_path = self.source / relative_path
+        source_path.parent.mkdir(parents=True)
+        payload = b'{"id":1,"label":"first"}\n\n{"id":2,"label":"second"}\n'
+        source_path.write_bytes(payload)
+        self._reference_full_dependency(relative_path)
+
+        self._export()
+
+        public_path = self.destination / relative_path
+        self.assertEqual(public_path.read_bytes(), payload)
+        self.assertEqual(public_path.stat().st_ino, source_path.stat().st_ino)
+
+    def test_redacts_json_lines_credentials_with_copy_on_write(self) -> None:
+        """Every JSON Lines value is sanitized and credential-bearing bytes are replaced."""
+        relative_path = "assets/mirrors/full-bench/catalog/credentials.json"
+        source_path = self.source / relative_path
+        source_path.parent.mkdir(parents=True)
+        token = "hf_" + "x" * 32
+        source_payload = (
+            '{"api_key":"fixture-secret","id":1}\n'
+            f'{{"id":2,"note":"temporary {token}"}}\n'
+        ).encode()
+        source_path.write_bytes(source_payload)
+        source_inode = source_path.stat().st_ino
+        self._reference_full_dependency(relative_path)
+
+        manifest = self._export()
+
+        public_path = self.destination / relative_path
+        public_payload = public_path.read_bytes()
+        public_values = [json.loads(line) for line in public_payload.splitlines()]
+        self.assertEqual(source_path.read_bytes(), source_payload)
+        self.assertEqual(source_path.stat().st_ino, source_inode)
+        self.assertNotEqual(public_path.stat().st_ino, source_inode)
+        self.assertEqual(public_values[0]["api_key"], "[REDACTED]")
+        self.assertEqual(public_values[1]["note"], "temporary [REDACTED]")
+        self.assertNotIn(token.encode(), public_payload)
+        self.assertGreaterEqual(manifest["totals"]["redactions"], 4)
+
+    def test_rejects_malformed_json_lines_dependency(self) -> None:
+        """An invalid non-empty JSON Lines row fails instead of becoming a raw public file."""
+        relative_path = "assets/mirrors/full-bench/catalog/malformed.json"
+        source_path = self.source / relative_path
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text('{"id":1}\nnot-json\n', encoding="utf-8")
+        self._reference_full_dependency(relative_path)
+
+        with self.assertRaisesRegex(ExportError, "JSON Lines.*line 2"):
+            self._export()
+
+        self.assertFalse(self.destination.exists())
+
+    def test_validate_closure_discovers_references_inside_json_lines(self) -> None:
+        """Closure validation follows local artifact references from every JSON Lines row."""
+        baseline = PublicReleaseExporter(
+            self.source,
+            self.destination,
+            self.policy_path,
+            "fixture-release",
+        ).validate_closure()
+        jsonl_path = "assets/mirrors/full-bench/catalog/references.json"
+        nested_path = "assets/mirrors/full-bench/task-1/from-json-lines.txt"
+        source_jsonl = self.source / jsonl_path
+        source_jsonl.parent.mkdir(parents=True)
+        source_jsonl.write_text(
+            '{"id":1}\n'
+            f'{{"id":2,"view_path":"{nested_path}"}}\n',
+            encoding="utf-8",
+        )
+        nested = self.source / nested_path
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text("discovered through JSON Lines", encoding="utf-8")
+        self._reference_full_dependency(jsonl_path)
+
+        result = PublicReleaseExporter(
+            self.source,
+            self.destination,
+            self.policy_path,
+            "fixture-release",
+        ).validate_closure()
+
+        self.assertEqual(result["closure_files"], baseline["closure_files"] + 2)
+        self.assertEqual(result["closure_json_files"], baseline["closure_json_files"] + 1)
 
     def test_redacts_text_preview_copy_on_write_and_synchronizes_manifest(self) -> None:
         """Strong preview credentials are redacted without changing source inode bytes."""
@@ -695,6 +791,50 @@ class PublicReleaseExporterTest(unittest.TestCase):
 
         with self.assertRaisesRegex(SecurityError, "Credential-shaped content"):
             _sha256_and_scan(package, "assets/mirrors/full-bench/credential.docx")
+
+    def test_exact_invalid_upstream_zip_can_be_download_only(self) -> None:
+        """One hash-pinned invalid upstream ZIP remains downloadable without being unpacked."""
+        path = "assets/mirrors/full-bench/task-1/upstream.zip"
+        package = self.source / path
+        package.parent.mkdir(parents=True, exist_ok=True)
+        package.write_bytes(b"PK\x03\x04upstream-object-without-central-directory")
+        digest = hashlib.sha256(package.read_bytes()).hexdigest()
+        full_shard_path = self.source / "data/benches/full-bench.json"
+        full_shard = json.loads(full_shard_path.read_text(encoding="utf-8"))
+        full_shard["tasks"][0]["download_path"] = path
+        _write_json(full_shard_path, full_shard)
+        self.policy["upstream_integrity_exceptions"] = {
+            path: {
+                "handling": "opaque_archive_download",
+                "reason_zh": "fixture upstream bytes",
+                "sha256": digest,
+                "size_bytes": package.stat().st_size,
+            }
+        }
+        self._refresh_policy_pins()
+
+        manifest = self._export()
+
+        record = next(item for item in manifest["files"] if item["path"] == path)
+        self.assertEqual(record["sha256"], digest)
+        self.assertEqual(record["content_disposition"], "attachment")
+        self.assertEqual(record["archive_scan"], "opaque-upstream-bytes-pinned-v1")
+        full_shard = json.loads(
+            (self.destination / "data/benches/full-bench.json").read_text(encoding="utf-8")
+        )
+        artifact = full_shard["tasks"][0]
+        self.assertEqual(artifact["integrity_status"], "upstream-anomaly-pinned-v1")
+        self.assertEqual(artifact["integrity_note_zh"], "fixture upstream bytes")
+
+    def test_opaque_archive_exception_cannot_bypass_member_security(self) -> None:
+        """A valid ZIP exception never bypasses path or credential checks inside members."""
+        package = self.root / "credential.zip"
+        with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("payload.txt", "hf_" + "a" * 32)
+        digest = hashlib.sha256(package.read_bytes()).hexdigest()
+
+        with self.assertRaisesRegex(SecurityError, "Credential-shaped content"):
+            _sha256_and_scan(package, "assets/mirrors/full-bench/credential.zip", digest)
 
 
 if __name__ == "__main__":

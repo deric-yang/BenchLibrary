@@ -1,7 +1,5 @@
 "use strict";
 
-const PUBLIC_MODE = globalThis.KW_BENCH_PUBLIC_MODE === true;
-
 const CATALOG_CANDIDATES = [
     "data/catalog.json",
     "data/index.json",
@@ -185,9 +183,8 @@ function cacheDom() {
         "resetBenchFilters", "relevanceFilters", "deliverableFilter", "benchGroups",
         "navBenchCount", "navStatusDot", "navStatusText", "catalogHome", "catalogStats",
         "tierOverview", "auditSummary", "auditTableBody", "coverageAudit", "exploreFirstBench",
-        "jumpToAudit", "openIngestionHome", "openIngestionSidebar", "heroTrackedCount",
-        "knowledgeCoverage", "knowledgeCoverageStatus", "ingestionWorkspace",
-        "ingestionBackButton",
+        "jumpToAudit", "heroTrackedCount", "knowledgeCoverage",
+        "knowledgeCoverageStatus",
         "knowledgeCoverageStats", "coverageCollisionGrid", "knowledgeCoverageTableBody",
         "knowledgeCoverageCards", "benchWorkspace", "benchHero", "benchAuditCard",
         "benchAuditCaption", "benchAuditBody", "taskSearch", "taskCategoryFilter",
@@ -235,17 +232,6 @@ function bindEvents() {
         dom.knowledgeCoverage.open = true;
         dom.knowledgeCoverage.scrollIntoView({behavior: "smooth", block: "start"});
     });
-    if (!PUBLIC_MODE) {
-        dom.openIngestionHome?.addEventListener("click", () => {
-            showIngestionWorkspace({updateLocation: true});
-        });
-        dom.openIngestionSidebar?.addEventListener("click", () => {
-            showIngestionWorkspace({updateLocation: true});
-        });
-        dom.ingestionBackButton?.addEventListener("click", () => {
-            showCatalogHome();
-        });
-    }
 
     dom.taskSearch.addEventListener("input", debounce(() => {
         state.taskSearch = dom.taskSearch.value.trim().toLocaleLowerCase();
@@ -307,18 +293,12 @@ async function loadCatalog() {
     abortActiveFetch();
     state.retryAction = loadCatalog;
     hideFatalState();
-    if (isIngestionLocation()) {
-        dom.loadingLayer.classList.add("hidden");
-        setNavStatus("loading", "目录后台加载");
-    }
-    else {
-        showLoader({
-            kicker: "CATALOG · STAGE 1 / 2",
-            title: "正在打开评测目录",
-            message: "先读取轻量索引；题库只在你选择 Bench 后加载。",
-        });
-        setNavStatus("loading", "读取目录");
-    }
+    showLoader({
+        kicker: "CATALOG · STAGE 1 / 2",
+        title: "正在打开评测目录",
+        message: "先读取轻量索引；题库只在你选择 Bench 后加载。",
+    });
+    setNavStatus("loading", "读取目录");
 
     let lastError = null;
     for (const candidate of CATALOG_CANDIDATES) {
@@ -350,11 +330,6 @@ async function loadCatalog() {
     }
 
     const message = lastError?.message || "没有找到可读取的 catalog.json。";
-    if (isIngestionLocation()) {
-        dom.loadingLayer.classList.add("hidden");
-        setNavStatus("error", "目录暂不可用");
-        return;
-    }
     setNavStatus("error", "目录读取失败");
     showLoaderError("目录没有加载成功", message, loadCatalog);
     showFatalState(message);
@@ -1190,8 +1165,6 @@ async function selectBench(benchId, options = {}) {
     if (!entry) {
         return;
     }
-    dom.ingestionWorkspace.classList.add("hidden");
-    globalThis.KwBenchIngestion?.deactivate();
     setSidebarOpen(false);
     state.activeBenchId = benchId;
     markActiveBenchButton();
@@ -1432,12 +1405,13 @@ function createOfficeQaDataNotice(bench) {
     const notice = createElement("aside", "officeqa-data-notice");
     const copy = document.createElement("div");
     copy.append(
-        createElement("strong", "", "HF 授权数据 · 可公开问题可审阅，答案已排除"),
+        createElement("strong", "", "授权数据 · 可公开问题可审阅，答案已排除"),
         createElement(
             "p",
             "",
-            "本站不会代用户访问 Hugging Face 门禁数据；Gold answer、答案哈希与 oracle 页码"
-                + "均未进入题库 shard、搜索索引或 Verifier 配置。",
+            "本站不会代用户访问受门禁保护的数据；Gold answer、答案哈希"
+                + "与 oracle 页码均未进入题库 shard、搜索索引"
+                + "或 Verifier 配置。",
         ),
     );
     const revision = createElement("div", "officeqa-revision-stack");
@@ -2868,7 +2842,11 @@ function renderUnavailablePreview(frame, material, spec, slot, task) {
     let title = "站内预览正在补齐";
     let description = "数据条目已经收录；转换后的 PDF、分页 WebP、JSONL 片段或安全 HTML 会在构建完成后出现。";
     const artifactStatus = firstString(task?.raw?.artifact?.status).toLocaleLowerCase();
-    if (slot === "output" && artifactStatus === "not_published") {
+    if (spec.integrityNote) {
+        title = "上游原件本身不完整";
+        description = spec.integrityNote;
+    }
+    else if (slot === "output" && artifactStatus === "not_published") {
         title = "官方未发布参评模型产物";
         description = "公开的任务、Gold 数据或 verifier 不等于公开的参评模型交付物。";
     }
@@ -2896,7 +2874,7 @@ function renderUnavailablePreview(frame, material, spec, slot, task) {
         createElement(
             "p",
             "",
-            material.note || description,
+            spec.integrityNote || material.note || description,
         ),
     );
     const mirrorExtension = fileExtension(spec.mirrorUrl);
@@ -3785,6 +3763,16 @@ function resolvePreviewSpec(material, task, slot) {
             ? spreadsheetPrintViewUrl
             : "",
         sourceSha256: firstString(previewRecord?.source_sha256, mirrorRecord?.sha256),
+        integrityStatus: firstString(
+            previewRecord?.integrity_status,
+            mirrorRecord?.integrity_status,
+            raw?.integrity_status,
+        ),
+        integrityNote: firstString(
+            previewRecord?.integrity_note_zh,
+            mirrorRecord?.integrity_note_zh,
+            raw?.integrity_note_zh,
+        ),
         sanitizedHtml,
         iframeSandbox: sanitizeIframeSandbox(previewRecord?.iframe_sandbox),
         mirrorReady: Boolean(mirrorRecord && mirrorUrl && mirrorRecord.status !== "error"),
@@ -4572,15 +4560,13 @@ function hideLoader() {
 function showFatalState(message) {
     dom.catalogHome.classList.add("hidden");
     dom.benchWorkspace.classList.add("hidden");
-    dom.ingestionWorkspace.classList.add("hidden");
     dom.fatalState.classList.remove("hidden");
     dom.fatalMessage.textContent = message;
 }
 
 function hideFatalState() {
     dom.fatalState.classList.add("hidden");
-    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-    if (!state.activeBenchId && params.get("view") !== "ingestion") {
+    if (!state.activeBenchId) {
         dom.catalogHome.classList.remove("hidden");
     }
 }
@@ -4600,9 +4586,7 @@ function showCatalogHome(options = {}) {
     state.activeTaskId = "";
     state.activeBench = null;
     dom.benchWorkspace.classList.add("hidden");
-    dom.ingestionWorkspace.classList.add("hidden");
     dom.catalogHome.classList.remove("hidden");
-    globalThis.KwBenchIngestion?.deactivate();
     markActiveBenchButton();
     if (options.updateLocation !== false) {
         updateLocation("", "");
@@ -4613,60 +4597,8 @@ function showCatalogHome(options = {}) {
     }
 }
 
-function showIngestionWorkspace(options = {}) {
-    if (PUBLIC_MODE) {
-        showCatalogHome({
-            scroll: options.scroll,
-            updateLocation: options.updateLocation,
-        });
-        return;
-    }
-    state.activeBenchId = "";
-    state.activeTaskId = "";
-    state.activeBench = null;
-    dom.catalogHome.classList.add("hidden");
-    dom.benchWorkspace.classList.add("hidden");
-    dom.fatalState.classList.add("hidden");
-    dom.ingestionWorkspace.classList.remove("hidden");
-    dom.loadingLayer.classList.add("hidden");
-    setSidebarOpen(false);
-    markActiveBenchButton();
-    setNavStatus("ready", "评测目录");
-    globalThis.KwBenchIngestion?.activate(options.jobId || "");
-    if (options.updateLocation !== false) {
-        updateIngestionLocation(options.jobId || "");
-    }
-    if (options.scroll !== false) {
-        window.scrollTo({top: 0, behavior: "smooth"});
-    }
-}
-
-function isIngestionLocation() {
-    if (PUBLIC_MODE) {
-        return false;
-    }
-    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-    return params.get("view") === "ingestion";
-}
-
 function handleHashChange() {
     const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-    const view = params.get("view") || "";
-    if (view === "ingestion") {
-        if (PUBLIC_MODE) {
-            updateLocation("", "");
-            if (state.benches.length) {
-                showCatalogHome({scroll: false, updateLocation: false});
-            }
-            return;
-        }
-        showIngestionWorkspace({
-            jobId: params.get("job") || "",
-            scroll: false,
-            updateLocation: false,
-        });
-        return;
-    }
     if (!state.benches.length) {
         return;
     }
@@ -4693,22 +4625,6 @@ function handleHashChange() {
         if (requestedTask && taskId !== state.activeTaskId) {
             selectTask(taskId, {updateLocation: false, scroll: false});
         }
-    }
-}
-
-function updateIngestionLocation(jobId) {
-    if (PUBLIC_MODE) {
-        updateLocation("", "");
-        return;
-    }
-    const params = new URLSearchParams();
-    params.set("view", "ingestion");
-    if (jobId) {
-        params.set("job", jobId);
-    }
-    const hash = `#${params.toString()}`;
-    if (location.hash !== hash) {
-        history.replaceState(null, "", `${location.pathname}${location.search}${hash}`);
     }
 }
 

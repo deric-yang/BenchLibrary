@@ -1,16 +1,17 @@
 {
   "schema_version": 1,
-  "policy_id": "kw-bench-library-public-v1",
+  "policy_id": "kw-bench-library-public-v2",
   "description": "Public-internet publication policy. Only explicitly listed benchmark data may enter the export.",
-  "expected_full_record_count": 7586,
+  "expected_full_record_count": 10021,
   "pinned_source_sha256": {
-    "assets/mirror_index.json": "60a3cc53bf5726401fbd956dfc49c6c0ba5a1a873762b1b16fa8ae86fd3e7712",
-    "assets/preview_index.json": "d4ba96673d294ebc55e67d29c791b93a8f76620334764608df4978813e3f185b",
+    "assets/mirror_index.json": "ec1ada7937c48a314a1adbf465c1b7decbf82313f89e12b0b569687bc5851d02",
+    "assets/preview_index.json": "a13fe30a77e84aba3087d70eed2762c029c3d811b354ac77458bd6659f6914a9",
     "assets/verifier_source_index.json": "cbfa7942dddb327da35f7633bbad79ba45287ded8e0afedb194df2f73b663b13",
     "data/benches/aa-briefcase.json": "92315e8be9930e49629af5b2dfa3bc51d44586f6d2a898294dfb597f81b3d83d",
     "data/benches/agents-last-exam.json": "5d3b74b5183a622c2dec620b1f7201906ec941c50d1b79e234ae86710b6ff053",
     "data/benches/apex-accounting.json": "dc864240793f073c7ded47bc93cd2ae2fd9fc2d30353f3be87458f69eef2c595",
     "data/benches/apex-agents.json": "f4d443dfac86d1df177a51f32dbd908b98b1013a1eb3fc347f0de28000cc4f4e",
+    "data/benches/artifactsbench.json": "c5a6d6f21b49f3dc5af8c5eb3c2a3ae273c3ea1f2f87d5b13dceda81250f2cd7",
     "data/benches/automationbench.json": "326ba5a48948f81628ac5f70f1b8e3bfab88c46400f11332019237fd0a3d68fd",
     "data/benches/deepresearch-bench.json": "7bfac859d4f8fcbfa12b82737cf0e121101be6086d2af008cbcda2a6ef781ceb",
     "data/benches/docops.json": "1cddccc0f3ca2a8946b812a858c9a914cec49d052e79bd9965666f9c9631f7ed",
@@ -18,11 +19,13 @@
     "data/benches/enterpriseops-gym.json": "07bc8414db797297fb4fdb558db7d054222d084716032e95b95b49427e34d5cd",
     "data/benches/gaia2.json": "53800043cc3a6c8bca6738651aeede540f09bd174d9df551e161e8880d10631b",
     "data/benches/gdp-pdf.json": "8d755d863ef6accdbdce5d48d9ad71c2bd6598be84a317aa7fa01f8c6384cf44",
+    "data/benches/gdpval.json": "511578d9ba0d066d42202953ef100b747be478906d2e677415bdc400d5f78eb4",
     "data/benches/handbook-md.json": "8d0f245993f3d7d4415ba683a7941bd431e047a47b1da98e75f7ff1e27e942ae",
     "data/benches/jobbench.json": "f7f9ab94bd34f4e0db3bc6d9836cf0851786a6fa21520e06766902d72b8d35ac",
     "data/benches/legal-agent-benchmark.json": "492547627217e71da9b281fa4d5a301487e7aa1f262b2146043250716a9ceda7",
     "data/benches/officebench.json": "919f5c1c48d5809b784c3c5ec1952f5e4bfbc5b4eacf41da9061584cecd49c8b",
     "data/benches/omegause-officeval.json": "eeca1daf6f7fe9f06a94066a930388910099129ff89e683fa6040ef9cf7163ab",
+    "data/benches/officeqa.json": "61e7f828bcf34f838970d831dd33e8627897ebf6501a3c54618dafd9b263cc75",
     "data/benches/parsebench.json": "0a32db112aeef3715274481c8e6ecc2397a4b956f8a15cfccbdb8bacfd9304f8",
     "data/benches/ppt-eval.json": "2f9879f8aec74b5f8817b2709bc31a3afacf39bdd575b1824684f704ce13222c",
     "data/benches/remote-labor-index.json": "132a56087ef04ee345c772af27843c80bbfebd3045a7076e3e76247eabaac08b",
@@ -32,7 +35,8 @@
     "data/benches/spreadsheetbench-v1.json": "6f459142263b61f02797e2db6632fec991e77c176b38c36b64b91f2dfb8705d8",
     "data/benches/tau3-banking.json": "b9c1166f222ad2fd20d98191875ac98feaffa7caa6439f6080f4290d5e37030b",
     "data/benches/the-agent-company.json": "342e63387469631467b92c42cfa943ea3db40ba7df0b387b81e444a3118d0883",
-    "data/catalog.json": "3d19437e74d3779a4ae4503cee034fd92bc695359eb1a94aa6d48fec04271848"
+    "data/benches/workbuddybench-office.json": "f62e5261fd960f22a92994771a7559404a156ca27f59af6b71a0f7cc22eefaac",
+    "data/catalog.json": "9053baebf8e077d977f5efc41c75f3754470d11487c22512fd7e31b1d00a19e2"
   },
   "full": {
     "aa-briefcase": {
@@ -50,6 +54,10 @@
     "apex-accounting": {
       "expected_records": 10,
       "reason_zh": "仅发布 CC BY 4.0 的十题 public dev sample；不包含 160 题闭源 scored set。"
+    },
+    "artifactsbench": {
+      "expected_records": 1825,
+      "reason_zh": "按最终公开发布确认，发布固定 revision 的 1,825 个公开任务及原件；保留上游署名、许可与 NOTICE，并明确标注中文翻译和安全预览属于修改内容。"
     },
     "automationbench": {
       "expected_records": 800,
@@ -79,6 +87,10 @@
       "expected_records": 100,
       "reason_zh": "MIT 许可且仅作 evaluation 使用的公开任务和 PDF。"
     },
+    "gdpval": {
+      "expected_records": 220,
+      "reason_zh": "按最终公开发布确认，发布固定 revision 的 220 题 gold subset、参考文件与说明；保留第一方署名、许可与 NOTICE，并明确标注中文翻译和安全预览属于修改内容。"
+    },
     "handbook-md": {
       "expected_records": 65,
       "reason_zh": "Apache-2.0 许可的公开任务、知识文件与 verifier。"
@@ -98,6 +110,10 @@
     "officebench": {
       "expected_records": 300,
       "reason_zh": "Apache-2.0 许可的公开 Office 任务与产物。"
+    },
+    "officeqa": {
+      "expected_records": 340,
+      "reason_zh": "按最终公开发布确认，合并发布固定 revision 的 OfficeQA Full 与 OfficeQA Pro V2 共 340 个任务及可公开原件；保留 CC BY-SA 4.0、原件署名与 NOTICE，并明确标注中文翻译和安全预览属于修改内容。"
     },
     "omegause-officeval": {
       "expected_records": 100,
@@ -131,28 +147,19 @@
       "expected_records": 175,
       "reason_zh": "MIT 许可的公开任务及其静态资料。"
     },
+    "workbuddybench-office": {
+      "expected_records": 50,
+      "reason_zh": "按最终公开发布确认，发布固定 revision 的 Office 50 题、原件与 verifier 资料；完整保留 Tencent 上游署名、定制许可、地域条款与 NOTICE，并明确标注中文翻译和安全预览属于修改内容。"
+    },
     "tau3-banking": {
       "expected_records": 97,
       "reason_zh": "MIT 许可；仅发布公开 base split、固定知识文档与公开 evaluator。"
     }
   },
-  "metadata_only": {
-    "artifactsbench": {
-      "reason_zh": "官方仓库、License.txt 与 Hugging Face metadata 的许可信号冲突；澄清前只发布介绍、许可提示和官方链接。"
-    },
-    "workbuddybench-office": {
-      "reason_zh": "Tencent custom license 含地域限制；获得明确公网再分发授权前只发布介绍和官方链接。"
-    }
-  },
+  "metadata_only": {},
   "link_only": {
     "arena-webdev": {
       "reason_zh": "LMArena 自定义条款明确禁止复制、嵌入、托管或转移数据；公网仅保留第一方入口。"
-    },
-    "gdpval": {
-      "reason_zh": "官方数据卡没有声明数据许可；公网仅保留方法介绍、规模口径与第一方链接。"
-    },
-    "officeqa": {
-      "reason_zh": "数据受 gated access 控制；不把一次性授权下载转为无人值守的公网镜像。"
     },
     "omnidocbench": {
       "reason_zh": "当前快照标记为 official-link-only/non-commercial；公网只提供第一方入口。"
@@ -172,6 +179,32 @@
     "data/kw_coverage.json",
     "data/mirror_manifest.json"
   ],
+  "upstream_integrity_exceptions": {
+    "assets/mirrors/gdpval/gold/deliverable_files/226c5ad480d4f5095cba55dbc1651caf/PrivateCrypMixV2.zip": {
+      "handling": "opaque_archive_download",
+      "reason_zh": "Hugging Face 固定 revision 的官方对象原样为 33,554,432 字节且缺少 ZIP 中央目录；本站严格校验官方 SHA256 后仅作为不可执行的下载附件发布，不解压、不内嵌预览。",
+      "sha256": "1a89088bcc431a2baae08a197a4f1be5337ba68d2f37f6c9c8a4dd9eef1888fe",
+      "size_bytes": 33554432
+    },
+    "assets/mirrors/gdpval/reference/reference_files/028fb83486152124cfecf2667c3cef37/DRUM REFERENCE TRACK.wav": {
+      "handling": "truncated_media_download",
+      "reason_zh": "Hugging Face 固定 revision 的官方 WAV 原样为 33,554,432 字节，但 RIFF 头声明的数据长度大于现有字节；本站保留并校验官方原件，仅供下载核查，不将其作为完整音频预览。",
+      "sha256": "6d290de658f620fccd714a3406601fcf5a296e940f9f1a9f0bc2cee4399ce234",
+      "size_bytes": 33554432
+    },
+    "assets/mirrors/gdpval/reference/reference_files/073946a18125717bdad58178466039fd/State of Affairs_STEM_BASS.wav": {
+      "handling": "truncated_media_download",
+      "reason_zh": "Hugging Face 固定 revision 的官方 WAV 原样为 33,554,432 字节，但 RIFF 头声明的数据长度大于现有字节；本站保留并校验官方原件，仅供下载核查，不将其作为完整音频预览。",
+      "sha256": "157c0500975f01c5256d7b8288d9c29096e69ca3f925b4b274249e57425009fa",
+      "size_bytes": 33554432
+    },
+    "assets/mirrors/gdpval/reference/reference_files/48836e54ef271e8fd1a301d3e20ea470/State of Affairs_STEM_ACGTRS.wav": {
+      "handling": "truncated_media_download",
+      "reason_zh": "Hugging Face 固定 revision 的官方 WAV 原样为 33,554,432 字节，但 RIFF 头声明的数据长度大于现有字节；本站保留并校验官方原件，仅供下载核查，不将其作为完整音频预览。",
+      "sha256": "151356e97565977d9633140f8165f8c12f06f444f4c8b250716537ac818fb4ef",
+      "size_bytes": 33554432
+    }
+  },
   "forbidden_path_prefixes": [
     "corpus/",
     "ingestion/",

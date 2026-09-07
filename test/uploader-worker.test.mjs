@@ -35,10 +35,27 @@ function environment(inventoryPages = new Map(), fixture = {}) {
       calls.push(["head", key]);
       return objects.get(key) || null;
     },
+    async get(key, options = {}) {
+      calls.push(["get", key, options]);
+      const stored = objects.get(key) || null;
+      if (!stored) {
+        return null;
+      }
+      if (options.onlyIf?.etagMatches && options.onlyIf.etagMatches !== stored.etag) {
+        const { body: _body, ...metadata } = stored;
+        return metadata;
+      }
+      if (fixture.getReturnsMetadataOnly) {
+        return { ...stored, body: undefined };
+      }
+      return stored;
+    },
     async put(key, body, options) {
       const data = new Uint8Array(await new Response(body).arrayBuffer());
       calls.push(["put", key, data.byteLength, options]);
       const stored = {
+        body: data,
+        etag: "stored",
         size: data.byteLength,
         httpEtag: '"stored"',
         customMetadata: options.customMetadata,
@@ -111,6 +128,7 @@ function environment(inventoryPages = new Map(), fixture = {}) {
       PUBLIC_CORPUS: bucket,
       UPLOAD_KEY_SHA256: uploadHash,
       UPLOAD_PREFIX: "releases/release-20260906/",
+      COPY_SOURCE_PREFIX: fixture.copySourcePrefix,
     },
   };
 }
@@ -164,6 +182,19 @@ test("reports only the configured immutable prefix on health", async () => {
   assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
+test("reports the fixed prior-release prefix only to an authenticated client", async () => {
+  const { env } = environment(new Map(), {
+    copySourcePrefix: "releases/release-20260905/",
+  });
+  const response = await uploaderWorker.fetch(request("/_kwbl-upload/v1/health"), env);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    prefix: "releases/release-20260906/",
+    copy_source_prefix: "releases/release-20260905/",
+  });
+});
+
 test("lists only the configured prefix with integrity metadata and pagination", async () => {
   const prefix = "releases/release-20260906/";
   const inventoryPages = new Map([
@@ -172,7 +203,11 @@ test("lists only the configured prefix with integrity metadata and pagination", 
         key: `${prefix}assets/first.bin`,
         size: 3,
         customMetadata: { sha256: "a".repeat(64), private: "not-returned" },
-        httpMetadata: { contentType: "application/octet-stream" },
+        httpMetadata: {
+          cacheControl: "public, max-age=31536000, immutable",
+          contentDisposition: "attachment",
+          contentType: "application/octet-stream",
+        },
         etag: "not-returned",
       }],
       truncated: true,
@@ -198,6 +233,12 @@ test("lists only the configured prefix with integrity metadata and pagination", 
       key: `${prefix}assets/first.bin`,
       size: 3,
       custom_metadata: { sha256: "a".repeat(64) },
+      http_metadata: {
+        cache_control: "public, max-age=31536000, immutable",
+        content_disposition: "attachment",
+        content_encoding: "",
+        content_type: "application/octet-stream",
+      },
     }],
     cursor: "next-page",
     truncated: true,
@@ -220,6 +261,12 @@ test("lists only the configured prefix with integrity metadata and pagination", 
       key: `${prefix}data/catalog.json`,
       size: 7,
       custom_metadata: { sha256: "b".repeat(64) },
+      http_metadata: {
+        cache_control: "",
+        content_disposition: "",
+        content_encoding: "",
+        content_type: "",
+      },
     }],
     cursor: null,
     truncated: false,
@@ -263,6 +310,148 @@ test("streams a validated public object into the release prefix", async () => {
   assert.equal(calls[1][3].sha256, createHash("sha256").update(payload).digest("hex"));
   assert.equal(calls[1][3].httpMetadata.contentEncoding, "gzip");
   assert.equal(calls[1][3].httpMetadata.contentDisposition, "attachment; filename=\"catalog.json\"");
+});
+
+test("copies an exact prior-release object without client retransmission", async () => {
+  const copySourcePrefix = "releases/release-20260905/";
+  const { calls, env, objects } = environment(new Map(), { copySourcePrefix });
+  const payload = new TextEncoder().encode("unchanged artifact");
+  const sha256 = createHash("sha256").update(payload).digest("hex");
+  objects.set(`${copySourcePrefix}assets/unchanged.bin`, {
+    body: payload,
+    etag: "source-etag",
+    httpEtag: '"source-etag"',
+    size: payload.byteLength,
+    customMetadata: { sha256 },
+    httpMetadata: { contentType: "old/type", cacheControl: "old-cache" },
+  });
+
+  const response = await uploaderWorker.fetch(request("/_kwbl-upload/v1/copy", {
+    method: "POST",
+    key: "assets/unchanged.bin",
+    headers: {
+      "X-KWBL-Object-Size": String(payload.byteLength),
+      "X-KWBL-SHA256": sha256,
+      "X-KWBL-Content-Type": "application/octet-stream",
+      "X-KWBL-Cache-Control": "public, max-age=31536000, immutable",
+    },
+  }), env);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    copied: true,
+    skipped: false,
+    size: payload.byteLength,
+    sha256,
+  });
+  assert.deepEqual(calls.slice(0, 3), [
+    ["head", "releases/release-20260906/assets/unchanged.bin"],
+    ["head", "releases/release-20260905/assets/unchanged.bin"],
+    ["get", "releases/release-20260905/assets/unchanged.bin", {
+      onlyIf: { etagMatches: "source-etag" },
+    }],
+  ]);
+  const copied = objects.get("releases/release-20260906/assets/unchanged.bin");
+  assert.deepEqual(copied.body, payload);
+  assert.equal(copied.customMetadata.sha256, sha256);
+  assert.equal(copied.httpMetadata.contentType, "application/octet-stream");
+});
+
+test("declines a prior-release object unless size and SHA-256 both match", async () => {
+  const copySourcePrefix = "releases/release-20260905/";
+  const { calls, env, objects } = environment(new Map(), { copySourcePrefix });
+  objects.set(`${copySourcePrefix}assets/mismatch.bin`, {
+    body: new TextEncoder().encode("old"),
+    etag: "source-etag",
+    size: 3,
+    customMetadata: { sha256: "a".repeat(64) },
+    httpMetadata: {},
+  });
+  const response = await uploaderWorker.fetch(request("/_kwbl-upload/v1/copy", {
+    method: "POST",
+    key: "assets/mismatch.bin",
+    headers: {
+      "X-KWBL-Object-Size": "3",
+      "X-KWBL-SHA256": "b".repeat(64),
+    },
+  }), env);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    copied: false,
+    skipped: false,
+    source_usable: false,
+  });
+  assert.deepEqual(calls.map(([operation]) => operation), ["head", "head"]);
+});
+
+test("declines copy when the conditional R2 read returns metadata without a body", async () => {
+  const copySourcePrefix = "releases/release-20260905/";
+  const { calls, env, objects } = environment(new Map(), {
+    copySourcePrefix,
+    getReturnsMetadataOnly: true,
+  });
+  const payload = new TextEncoder().encode("changed during copy");
+  const sha256 = createHash("sha256").update(payload).digest("hex");
+  objects.set(`${copySourcePrefix}assets/raced.bin`, {
+    body: payload,
+    etag: "source-etag",
+    size: payload.byteLength,
+    customMetadata: { sha256 },
+    httpMetadata: {},
+  });
+
+  const response = await uploaderWorker.fetch(request("/_kwbl-upload/v1/copy", {
+    method: "POST",
+    key: "assets/raced.bin",
+    headers: {
+      "X-KWBL-Object-Size": String(payload.byteLength),
+      "X-KWBL-SHA256": sha256,
+    },
+  }), env);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    copied: false,
+    skipped: false,
+    source_usable: false,
+  });
+  assert.deepEqual(calls.map(([operation]) => operation), ["head", "head", "get"]);
+});
+
+test("refuses copy when the source and destination prefixes are identical", async () => {
+  const { calls, env } = environment(new Map(), {
+    copySourcePrefix: "releases/release-20260906/",
+  });
+  const response = await uploaderWorker.fetch(request("/_kwbl-upload/v1/copy", {
+    method: "POST",
+    key: "assets/unsafe.bin",
+    headers: {
+      "X-KWBL-Object-Size": "1",
+      "X-KWBL-SHA256": "a".repeat(64),
+    },
+  }), env);
+  assert.equal(response.status, 500);
+  assert.deepEqual(calls, []);
+});
+
+test("refuses a stream copy above the R2 single-part upload ceiling", async () => {
+  const { calls, env } = environment(new Map(), {
+    copySourcePrefix: "releases/release-20260905/",
+  });
+  const response = await uploaderWorker.fetch(request("/_kwbl-upload/v1/copy", {
+    method: "POST",
+    key: "assets/too-large.bin",
+    headers: {
+      "X-KWBL-Object-Size": String(5 * 1024 * 1024 * 1024),
+      "X-KWBL-SHA256": "a".repeat(64),
+    },
+  }), env);
+  assert.equal(response.status, 400);
+  assert.deepEqual(calls, []);
 });
 
 test("requires multipart uploads above the conservative direct request limit", async () => {

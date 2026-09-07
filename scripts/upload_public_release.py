@@ -32,6 +32,7 @@ DIRECT_LIMIT = 32 * 1024 * 1024
 PART_SIZE = 16 * 1024 * 1024
 MAX_ATTEMPTS = 6
 MAX_INVENTORY_PAGES = 100000
+MAX_SERVER_COPY_BYTES = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 ALLOWED_ROOTS = {"site", "data", "assets"}
 RELEASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -57,6 +58,15 @@ class ReleaseManifest:
     release_id: str
     prefix: str
     files: tuple[ReleaseFile, ...]
+
+
+@dataclass(frozen=True)
+class CopySourceManifest:
+    """Describe a previously verified release eligible for same-path reuse."""
+
+    release_id: str
+    prefix: str
+    files: dict[str, tuple[int, str]]
 
 
 @dataclass(frozen=True)
@@ -173,6 +183,7 @@ class PublicReleaseUploader:
         proxy: str | None,
         state_path: pathlib.Path,
         release_prefix: str,
+        copy_source_prefix: str | None = None,
     ) -> None:
         """Initialize authenticated HTTP sessions and resumable local state."""
         self.endpoint = endpoint.rstrip("/")
@@ -180,6 +191,7 @@ class PublicReleaseUploader:
         self.proxies = {"http": proxy, "https": proxy} if proxy else None
         self.state_path = state_path
         self.release_prefix = release_prefix
+        self.copy_source_prefix = copy_source_prefix
         self.state_lock = threading.Lock()
         self.thread_local = threading.local()
         self.completed, self.multipart = self._load_state()
@@ -193,11 +205,11 @@ class PublicReleaseUploader:
             self.thread_local.session = session
         return session
 
-    def _load_state(self) -> tuple[dict[str, str], dict[str, MultipartState]]:
+    def _load_state(self) -> tuple[dict[str, tuple[str, str]], dict[str, MultipartState]]:
         """Load append-only completed and in-flight multipart transfer state."""
         if not self.state_path.exists():
             return {}, {}
-        completed: dict[str, str] = {}
+        completed: dict[str, tuple[str, str]] = {}
         multipart: dict[str, MultipartState] = {}
         with self.state_path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -215,7 +227,12 @@ class PublicReleaseUploader:
                 if payload.get("prefix") != self.release_prefix or not _valid_sha256(sha256):
                     raise UploadFailure(f"Invalid upload state line {line_number}: {self.state_path}")
                 if event == "complete":
-                    completed[path] = sha256
+                    metadata_sha256 = str(payload.get("metadata_sha256", "")).lower()
+                    if metadata_sha256 and not _valid_sha256(metadata_sha256):
+                        raise UploadFailure(
+                            f"Invalid upload state line {line_number}: {self.state_path}"
+                        )
+                    completed[path] = (sha256, metadata_sha256)
                     multipart.pop(path, None)
                 elif event == "multipart":
                     multipart[path] = _multipart_state_from_record(payload, line_number, self.state_path)
@@ -238,10 +255,12 @@ class PublicReleaseUploader:
     def _save_completed(self, item: ReleaseFile) -> None:
         """Append one successfully persisted object to the resume state."""
         with self.state_lock:
-            self.completed[item.path] = item.sha256
+            metadata_sha256 = _metadata_sha256(item)
+            self.completed[item.path] = (item.sha256, metadata_sha256)
             self.multipart.pop(item.path, None)
             self._append_state({
                 "event": "complete",
+                "metadata_sha256": metadata_sha256,
                 "path": item.path,
                 "prefix": self.release_prefix,
                 "sha256": item.sha256,
@@ -388,18 +407,52 @@ class PublicReleaseUploader:
             "objects": objects,
         }
 
-    def upload(self, root: pathlib.Path, item: ReleaseFile) -> str:
+    def upload(self, root: pathlib.Path, item: ReleaseFile, allow_copy: bool = False) -> str:
         """Verify and upload one release object or honor a valid local resume record."""
         source = safe_source_path(root, item)
         verify_source_hash(source, item)
-        if self.completed.get(item.path) == item.sha256:
+        if self.completed.get(item.path) == (item.sha256, _metadata_sha256(item)):
             return "resume-skip"
+        if allow_copy:
+            copied = self._copy_from_previous(item)
+            if copied is not None:
+                self._save_completed(item)
+                return copied
         if item.size <= DIRECT_LIMIT:
             result = self._put_direct(source, item)
         else:
             result = self._put_multipart(source, item)
         self._save_completed(item)
         return result
+
+    def _copy_from_previous(self, item: ReleaseFile) -> str | None:
+        """Ask the Worker to reuse one same-path object from a fixed prior release."""
+        if self.copy_source_prefix is None:
+            return None
+        headers = self._headers(item)
+        headers["X-KWBL-Object-Size"] = str(item.size)
+        response = self._request_with_retry(
+            "POST",
+            f"{self.endpoint}/_kwbl-upload/v1/copy",
+            headers=headers,
+        )
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise UploadFailure("Uploader copy endpoint returned invalid JSON") from error
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise UploadFailure("Uploader copy endpoint did not report success")
+        if payload.get("source_usable") is False:
+            if payload.get("copied") is not False or payload.get("skipped") is not False:
+                raise UploadFailure("Uploader copy fallback response is malformed")
+            return None
+        if (
+            payload.get("size") != item.size
+            or payload.get("sha256") != item.sha256
+            or (payload.get("copied") is True) == (payload.get("skipped") is True)
+        ):
+            raise UploadFailure("Uploader copy endpoint returned an invalid result")
+        return "server-copy" if payload.get("copied") is True else "remote-skip"
 
     def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         """Perform one bounded HTTP operation with fresh streaming bodies on retries."""
@@ -707,11 +760,81 @@ def load_manifest(path: pathlib.Path, root: pathlib.Path) -> ReleaseManifest:
     return ReleaseManifest(release_id, expected_prefix, tuple(ordered))
 
 
-def validate_uploader_prefix(health: dict[str, Any], manifest: ReleaseManifest) -> None:
+def load_copy_source_manifest(path: pathlib.Path) -> CopySourceManifest:
+    """Load the immutable manifest for a fixed, already-verified R2 release."""
+    supplied = path.absolute()
+    if supplied.is_symlink() or not supplied.is_file():
+        raise UploadFailure(f"Copy-source manifest is missing or unsafe: {supplied}")
+    payload = json.loads(supplied.read_text(encoding="utf-8"))
+    release_id = payload.get("release_id") if isinstance(payload, dict) else None
+    if not isinstance(release_id, str) or not RELEASE_ID_PATTERN.fullmatch(release_id):
+        raise UploadFailure("Copy-source manifest has an invalid release_id")
+    prefix = f"releases/{release_id}/"
+    raw_files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(raw_files, list):
+        raise UploadFailure("Copy-source manifest must contain a files array")
+    files: dict[str, tuple[int, str]] = {}
+    for raw in raw_files:
+        if not isinstance(raw, dict):
+            raise UploadFailure("Copy-source manifest contains a non-object file entry")
+        path_value = raw.get("path")
+        size = raw.get("size")
+        sha256 = raw.get("sha256")
+        if (
+            not isinstance(path_value, str)
+            or not path_value
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+            or not _valid_sha256(sha256)
+            or raw.get("r2_key") != f"{prefix}{path_value}"
+        ):
+            raise UploadFailure("Copy-source manifest contains an invalid file entry")
+        relative = pathlib.PurePosixPath(path_value)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or not relative.parts
+            or relative.parts[0] not in ALLOWED_ROOTS
+        ):
+            raise UploadFailure(f"Copy-source manifest path is unsafe: {path_value}")
+        if path_value in files:
+            raise UploadFailure(f"Copy-source manifest contains a duplicate path: {path_value}")
+        files[path_value] = (size, sha256)
+    return CopySourceManifest(release_id, prefix, files)
+
+
+def select_copy_candidates(
+    files: tuple[ReleaseFile, ...],
+    copy_source: CopySourceManifest | None,
+) -> set[str]:
+    """Select exact same-path content that fits R2's single-part copy ceiling."""
+    if copy_source is None:
+        return set()
+    return {
+        item.path
+        for item in files
+        if item.size <= MAX_SERVER_COPY_BYTES
+        and copy_source.files.get(item.path) == (item.size, item.sha256)
+    }
+
+
+def validate_uploader_prefix(
+    health: dict[str, Any],
+    manifest: ReleaseManifest,
+    copy_source: CopySourceManifest | None = None,
+) -> None:
     """Prevent a valid release from being written beneath the wrong immutable prefix."""
     if health.get("prefix") != manifest.prefix:
         raise UploadFailure(
             f"Uploader prefix mismatch: expected {manifest.prefix!r}, got {health.get('prefix')!r}"
+        )
+    expected_copy_prefix = copy_source.prefix if copy_source else None
+    actual_copy_prefix = health.get("copy_source_prefix")
+    if expected_copy_prefix is not None and actual_copy_prefix != expected_copy_prefix:
+        raise UploadFailure(
+            "Uploader copy-source prefix mismatch: "
+            f"expected {expected_copy_prefix!r}, got {actual_copy_prefix!r}"
         )
 
 
@@ -783,6 +906,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token-file", type=pathlib.Path, required=True)
     parser.add_argument("--state-file", type=pathlib.Path)
     parser.add_argument("--inventory-file", type=pathlib.Path)
+    parser.add_argument("--copy-source-manifest", type=pathlib.Path)
     parser.add_argument("--proxy")
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--delete-token-on-success", action="store_true")
@@ -819,6 +943,14 @@ def main() -> int:
         raise UploadFailure("Upload token file is empty or invalid")
     manifest = load_manifest(manifest_path, root)
     files = manifest.files
+    copy_source = (
+        load_copy_source_manifest(args.copy_source_manifest)
+        if args.copy_source_manifest
+        else None
+    )
+    if copy_source is not None and copy_source.release_id == manifest.release_id:
+        raise UploadFailure("Copy-source release must differ from the destination release")
+    copy_candidates = select_copy_candidates(files, copy_source)
     total_bytes = sum(item.size for item in files)
     uploader = PublicReleaseUploader(
         endpoint=args.endpoint,
@@ -826,13 +958,21 @@ def main() -> int:
         proxy=args.proxy,
         state_path=state_path,
         release_prefix=manifest.prefix,
+        copy_source_prefix=copy_source.prefix if copy_source else None,
     )
     health = uploader.health()
-    validate_uploader_prefix(health, manifest)
+    validate_uploader_prefix(health, manifest, copy_source)
     print(
         f"Uploader ready for prefix {manifest.prefix}; {len(files):,} files, {total_bytes:,} bytes",
         flush=True,
     )
+    if copy_source is not None:
+        reusable_bytes = sum(item.size for item in files if item.path in copy_candidates)
+        print(
+            f"Prior-release reuse eligible: {len(copy_candidates):,} files, "
+            f"{reusable_bytes:,} bytes from {copy_source.release_id}",
+            flush=True,
+        )
 
     started = time.monotonic()
     finished_files = 0
@@ -842,7 +982,7 @@ def main() -> int:
 
     def perform(item: ReleaseFile) -> tuple[ReleaseFile, str]:
         """Upload one item and preserve it for progress accounting."""
-        return item, uploader.upload(root, item)
+        return item, uploader.upload(root, item, allow_copy=item.path in copy_candidates)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.workers, 32))) as executor:
         futures = {executor.submit(perform, item): item for item in files}

@@ -1,0 +1,23 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  // Override this with --name for every release, then delete that Worker after
+  // the exact R2 inventory has passed verification.
+  "name": "kwbl-release-uploader",
+  "main": "./uploader-worker.mjs",
+  "compatibility_date": "2026-09-06",
+  "workers_dev": false,
+  "preview_urls": false,
+  "r2_buckets": [
+    {
+      "binding": "PUBLIC_CORPUS",
+      "bucket_name": "benchlibrary-public"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    }
+  }
+}

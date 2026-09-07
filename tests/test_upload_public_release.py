@@ -13,14 +13,17 @@ from unittest import mock
 import requests
 
 from scripts.upload_public_release import (
+    CopySourceManifest,
     MultipartUploadMissing,
     PublicReleaseUploader,
     ReleaseFile,
     ReleaseManifest,
     UploadFailure,
     finalize_verified_upload,
+    load_copy_source_manifest,
     load_manifest,
     safe_source_path,
+    select_copy_candidates,
     validate_uploader_prefix,
 )
 
@@ -108,6 +111,47 @@ class FakeMultipartUploader(PublicReleaseUploader):
         raise AssertionError(f"Unexpected multipart route: {route}")
 
 
+class FakeCopyUploader(PublicReleaseUploader):
+    """Emulate prior-release reuse plus an optional direct-upload fallback."""
+
+    def __init__(self, state_path: Path, source_usable: bool = True) -> None:
+        """Configure whether the fixed prior release contains the requested object."""
+        super().__init__(
+            "https://upload.invalid",
+            "x" * 64,
+            None,
+            state_path,
+            "releases/new-release/",
+            "releases/old-release/",
+        )
+        self.source_usable = source_usable
+        self.calls: list[dict[str, Any]] = []
+
+    def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
+        """Return a copy result or capture the subsequent full-upload fallback."""
+        route = url.rsplit("/", maxsplit=1)[-1]
+        headers = kwargs.get("headers", {})
+        self.calls.append({"route": route, "method": method, "headers": headers})
+        if route == "copy":
+            if not self.source_usable:
+                return FakeResponse({
+                    "ok": True,
+                    "copied": False,
+                    "skipped": False,
+                    "source_usable": False,
+                })
+            return FakeResponse({
+                "ok": True,
+                "copied": True,
+                "skipped": False,
+                "size": int(headers["X-KWBL-Object-Size"]),
+                "sha256": headers["X-KWBL-SHA256"],
+            })
+        if route == "object":
+            return FakeResponse({"ok": True, "skipped": False})
+        raise AssertionError(f"Unexpected copy test route: {route}")
+
+
 class UploadManifestTest(unittest.TestCase):
     """Ensure the manifest publishes and authenticates its own description."""
 
@@ -190,6 +234,85 @@ class UploadManifestTest(unittest.TestCase):
         with self.assertRaisesRegex(UploadFailure, "prefix mismatch"):
             validate_uploader_prefix({"prefix": "releases/wrong-release/"}, loaded)
 
+    def test_rejects_uploader_bound_to_another_copy_source(self) -> None:
+        """The Worker cannot silently copy from an unreviewed R2 release."""
+        loaded = ReleaseManifest("new-release", "releases/new-release/", ())
+        source = CopySourceManifest("old-release", "releases/old-release/", {})
+        health = {
+            "prefix": loaded.prefix,
+            "copy_source_prefix": "releases/unreviewed-release/",
+        }
+        with self.assertRaisesRegex(UploadFailure, "copy-source prefix mismatch"):
+            validate_uploader_prefix(health, loaded, source)
+
+    def test_loads_only_exact_same_path_copy_source_records(self) -> None:
+        """Prior manifest keys remain bound to their immutable R2 release prefix."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "old-manifest.json"
+            path.write_text(
+                json.dumps({
+                    "release_id": "old-release",
+                    "files": [{
+                        "path": "assets/unchanged.bin",
+                        "r2_key": "releases/old-release/assets/unchanged.bin",
+                        "size": 7,
+                        "sha256": "a" * 64,
+                    }],
+                }),
+                encoding="utf-8",
+            )
+
+            loaded = load_copy_source_manifest(path)
+
+            self.assertEqual(loaded.prefix, "releases/old-release/")
+            self.assertEqual(loaded.files, {"assets/unchanged.bin": (7, "a" * 64)})
+
+    def test_copy_candidates_exclude_objects_above_r2_single_part_limit(self) -> None:
+        """Oversized identical content remains on the resumable multipart path."""
+        small = ReleaseFile(
+            "assets/small.bin",
+            3,
+            "a" * 64,
+            "application/octet-stream",
+            "public, max-age=31536000, immutable",
+        )
+        large = ReleaseFile(
+            "assets/large.bin",
+            5 * 1024 * 1024 * 1024,
+            "b" * 64,
+            "application/octet-stream",
+            "public, max-age=31536000, immutable",
+        )
+        source = CopySourceManifest(
+            "old-release",
+            "releases/old-release/",
+            {
+                small.path: (small.size, small.sha256),
+                large.path: (large.size, large.sha256),
+            },
+        )
+
+        self.assertEqual(select_copy_candidates((small, large), source), {small.path})
+
+    def test_rejects_copy_source_record_outside_its_release_prefix(self) -> None:
+        """A prior manifest cannot redirect a copy lookup to another release."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "old-manifest.json"
+            path.write_text(
+                json.dumps({
+                    "release_id": "old-release",
+                    "files": [{
+                        "path": "assets/unchanged.bin",
+                        "r2_key": "releases/other-release/assets/unchanged.bin",
+                        "size": 7,
+                        "sha256": "a" * 64,
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(UploadFailure, "invalid file entry"):
+                load_copy_source_manifest(path)
+
     def test_rejects_symlinked_parent_directory(self) -> None:
         """A parent symlink cannot redirect upload reads outside the release root."""
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -270,6 +393,82 @@ class UploadManifestTest(unittest.TestCase):
                     state,
                     "releases/new-release/",
                 )
+
+    def test_exact_prior_release_copy_avoids_client_file_upload(self) -> None:
+        """An unchanged local file is hashed, copied in R2, and checkpointed."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "release"
+            (root / "assets").mkdir(parents=True)
+            payload = root / "assets/unchanged.bin"
+            payload.write_bytes(b"unchanged")
+            item = ReleaseFile(
+                "assets/unchanged.bin",
+                payload.stat().st_size,
+                hashlib.sha256(payload.read_bytes()).hexdigest(),
+                "application/octet-stream",
+                "public, max-age=31536000, immutable",
+            )
+            state_path = Path(temporary_directory) / "state.jsonl"
+            uploader = FakeCopyUploader(state_path)
+
+            result = uploader.upload(root, item, allow_copy=True)
+
+            self.assertEqual(result, "server-copy")
+            self.assertEqual([call["route"] for call in uploader.calls], ["copy"])
+            self.assertEqual(
+                uploader.calls[0]["headers"]["X-KWBL-Object-Size"],
+                str(item.size),
+            )
+            record = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(record["event"], "complete")
+            self.assertEqual(record["sha256"], item.sha256)
+            self.assertRegex(record["metadata_sha256"], r"^[a-f0-9]{64}$")
+
+    def test_missing_prior_release_object_falls_back_to_full_upload(self) -> None:
+        """A changed or absent source object retains the original upload path."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "release"
+            (root / "assets").mkdir(parents=True)
+            payload = root / "assets/new.bin"
+            payload.write_bytes(b"new")
+            item = ReleaseFile(
+                "assets/new.bin",
+                payload.stat().st_size,
+                hashlib.sha256(payload.read_bytes()).hexdigest(),
+                "application/octet-stream",
+                "public, max-age=31536000, immutable",
+            )
+            uploader = FakeCopyUploader(
+                Path(temporary_directory) / "state.jsonl",
+                source_usable=False,
+            )
+
+            result = uploader.upload(root, item, allow_copy=True)
+
+            self.assertEqual(result, "uploaded")
+            self.assertEqual([call["route"] for call in uploader.calls], ["copy", "object"])
+
+    def test_copy_still_rehashes_local_candidate_before_network_request(self) -> None:
+        """Server reuse cannot hide mutation of the immutable local candidate."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "release"
+            (root / "assets").mkdir(parents=True)
+            payload = root / "assets/changed.bin"
+            payload.write_bytes(b"good")
+            item = ReleaseFile(
+                "assets/changed.bin",
+                payload.stat().st_size,
+                hashlib.sha256(payload.read_bytes()).hexdigest(),
+                "application/octet-stream",
+                "public, max-age=31536000, immutable",
+            )
+            payload.write_bytes(b"evil")
+            uploader = FakeCopyUploader(Path(temporary_directory) / "state.jsonl")
+
+            with self.assertRaisesRegex(UploadFailure, "SHA-256 mismatch"):
+                uploader.upload(root, item, allow_copy=True)
+
+            self.assertEqual(uploader.calls, [])
 
     def test_object_encoding_metadata_is_not_used_as_request_encoding(self) -> None:
         """Gzip metadata stays namespaced so multipart JSON and slices are not decoded."""
@@ -659,12 +858,24 @@ class UploadManifestTest(unittest.TestCase):
                             "key": f"{manifest.prefix}data/catalog.json",
                             "size": 3,
                             "custom_metadata": {"sha256": catalog_hash},
+                            "http_metadata": {
+                                "cache_control": "public, max-age=300, must-revalidate",
+                                "content_disposition": "",
+                                "content_encoding": "",
+                                "content_type": "application/json",
+                            },
                         },
                         {
                             "key": f"{manifest.prefix}data/public_manifest.json",
                             "size": len(manifest_bytes),
                             "custom_metadata": {
                                 "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                            },
+                            "http_metadata": {
+                                "cache_control": "public, max-age=300, must-revalidate",
+                                "content_disposition": "",
+                                "content_encoding": "",
+                                "content_type": "application/json; charset=utf-8",
                             },
                         },
                     ],

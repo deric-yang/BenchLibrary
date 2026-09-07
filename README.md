@@ -13,7 +13,7 @@ benchlibrary.com
   └─ /data/* 与 /assets/*（同源流式读取 R2）
 
 开发机 immutable release
-  └─ 许可白名单导出 + 脱敏 + SHA-256 manifest
+  └─ 公开策略白名单导出 + 脱敏 + SHA-256 manifest
        └─ R2 releases/<release-id>/...
 ```
 
@@ -23,14 +23,16 @@ benchlibrary.com
 
 公网导出是显式白名单，不是开发机目录的镜像：
 
-- 完整发布 25 个已确认可公开再分发的 Benchmark，共 7,586 个任务。
-- 许可证冲突或含地域限制的项目只保留说明和第一方链接。
-- gated、禁止再分发或未声明数据许可的项目不发布任务与原件。
-- proprietary / closed Benchmark 完全排除。
+- 完整发布 29 个已确认可公开再分发的 Benchmark，共 10,021 个任务。
+- 每个 Benchmark 的 `full`、`metadata_only`、`link_only` 或 `exclude` 决策都在固定策略中逐项记录；不依据 gated 状态或其他单一信号自动推断。
+- 未取得最终公开发布确认、禁止再分发以及 proprietary / closed Benchmark 仍保持链接、元数据或完全排除边界。
 - 永不打包接入后台、Contributor Key、Hugging Face Token、作业记录、私有 corpus、服务端配置或内部部署清单。
 - 原始 HTML、JavaScript、SVG 与 Verifier 源码由 Worker 强制按文本提供；转换后的 HTML 预览在无同源权限、无网络能力的 sandbox 中打开。
+- 固定 revision 中已经由上游发布、但结构本身不完整的对象必须按 path、size 与 SHA-256 精确登记并在页面显式提示；无效归档只允许作为下载附件提供。
 
 具体决策见 [`config/publication_policy.json`](config/publication_policy.json)。上游数据和产物继续适用各自许可证；本仓库的 Apache-2.0 许可证不会覆盖它们。
+
+开发机版本与公网版本的来源、同步、核验、切换和回滚约定见 [`docs/RELEASE_RUNBOOK.md`](docs/RELEASE_RUNBOOK.md)。
 
 ## 本地开发
 

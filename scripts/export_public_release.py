@@ -138,6 +138,42 @@ def _load_json_file(path: Path) -> Any:
         raise ExportError(f"Cannot read valid JSON from {path}: {exc}") from exc
 
 
+def _load_json_document(path: Path) -> tuple[list[Any], bool]:
+    """Load one JSON value or a strict sequence of non-empty JSON Lines values."""
+    try:
+        payload = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ExportError(f"Cannot read valid JSON from {path}: {exc}") from exc
+    try:
+        return [json.loads(payload)], False
+    except json.JSONDecodeError as exc:
+        if exc.msg != "Extra data":
+            raise ExportError(f"Cannot read valid JSON from {path}: {exc}") from exc
+
+    values: list[Any] = []
+    for line_number, line in enumerate(payload.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            values.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise ExportError(
+                f"Cannot read valid JSON Lines from {path} at line {line_number}: {exc}"
+            ) from exc
+    if not values:
+        raise ExportError(f"Cannot read valid JSON Lines from {path}: no JSON values")
+    return values, True
+
+
+def _json_lines_bytes(values: Iterable[Any]) -> bytes:
+    """Serialize JSON Lines values deterministically with exactly one value per line."""
+    lines = [
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        for value in values
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 def _redact_string(value: str) -> tuple[str, int]:
     """Remove strong credential shapes and signed URL query values from a string."""
     if REDACTED_RE.fullmatch(value.strip()):
@@ -381,7 +417,11 @@ def _scan_compressed_contents(path: Path, relative_path: str) -> None:
             raise ExportError(f"Invalid gzip payload in {relative_path}: {exc}") from exc
 
 
-def _sha256_and_scan(path: Path, relative_path: str) -> str:
+def _sha256_and_scan(
+    path: Path,
+    relative_path: str,
+    opaque_archive_sha256: str | None = None,
+) -> str:
     """Hash a file and fail if its public bytes contain a strong credential."""
     digest = hashlib.sha256()
 
@@ -392,14 +432,26 @@ def _sha256_and_scan(path: Path, relative_path: str) -> str:
             yield chunk
 
     _scan_chunks(hashing_chunks(), relative_path)
-    _scan_compressed_contents(path, relative_path)
-    return digest.hexdigest()
+    actual_sha256 = digest.hexdigest()
+    try:
+        _scan_compressed_contents(path, relative_path)
+    except SecurityError:
+        raise
+    except ExportError:
+        if opaque_archive_sha256 is None or actual_sha256 != opaque_archive_sha256:
+            raise
+        return actual_sha256
+    if opaque_archive_sha256 is not None:
+        raise ExportError(
+            f"Opaque archive exception is no longer necessary for {relative_path}"
+        )
+    return actual_sha256
 
 
-def _hash_release_file(item: tuple[str, Path]) -> tuple[str, int, str]:
+def _hash_release_file(item: tuple[str, Path, str | None]) -> tuple[str, int, str]:
     """Hash and scan one manifest item, returning self-identifying worker output."""
-    relative_path, path = item
-    digest = _sha256_and_scan(path, relative_path)
+    relative_path, path, opaque_archive_sha256 = item
+    digest = _sha256_and_scan(path, relative_path, opaque_archive_sha256)
     return relative_path, path.stat().st_size, digest
 
 
@@ -478,6 +530,41 @@ def _validate_policy(policy: dict[str, Any]) -> tuple[set[str], set[str], set[st
     return full, metadata_only, link_only, excluded
 
 
+def _validate_upstream_integrity_exceptions(policy: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Validate exact upstream anomalies without treating them as locally complete files."""
+    raw_exceptions = policy.get("upstream_integrity_exceptions", {})
+    if not isinstance(raw_exceptions, dict):
+        raise ExportError("Publication policy upstream_integrity_exceptions must be an object")
+    exceptions: dict[str, dict[str, Any]] = {}
+    for relative_path, metadata in raw_exceptions.items():
+        if not isinstance(relative_path, str):
+            raise ExportError("Opaque archive exception paths must be strings")
+        normalized = _normalize_reference(relative_path)
+        if normalized != relative_path or not relative_path.startswith("assets/mirrors/"):
+            raise ExportError(f"Invalid upstream integrity exception path: {relative_path!r}")
+        if not isinstance(metadata, dict):
+            raise ExportError(f"Upstream integrity exception must be an object: {relative_path}")
+        expected_sha256 = metadata.get("sha256")
+        expected_size = metadata.get("size_bytes")
+        reason_zh = metadata.get("reason_zh")
+        handling = metadata.get("handling")
+        if (
+            not isinstance(expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        ):
+            raise ExportError(f"Invalid upstream integrity SHA-256 for {relative_path}")
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 1:
+            raise ExportError(f"Invalid upstream integrity size for {relative_path}")
+        if not isinstance(reason_zh, str) or not reason_zh.strip():
+            raise ExportError(f"Missing upstream integrity reason_zh for {relative_path}")
+        if handling not in {"opaque_archive_download", "truncated_media_download"}:
+            raise ExportError(f"Invalid upstream integrity handling for {relative_path}")
+        if handling == "opaque_archive_download" and Path(relative_path).suffix.lower() != ".zip":
+            raise ExportError(f"Opaque archive exception must identify a ZIP: {relative_path}")
+        exceptions[relative_path] = metadata
+    return exceptions
+
+
 class PublicReleaseExporter:
     """Create a public release from one immutable internal release directory."""
 
@@ -498,6 +585,13 @@ class PublicReleaseExporter:
         self.policy = _load_json_file(self.policy_path)
         self.full, self.metadata_only, self.link_only, self.excluded = _validate_policy(self.policy)
         self.public_benchmarks = self.full | self.metadata_only | self.link_only
+        self.upstream_integrity_exceptions = _validate_upstream_integrity_exceptions(self.policy)
+        self.integrity_exception_benches = {
+            bench_id
+            for relative_path in self.upstream_integrity_exceptions
+            for bench_id in [self._scoped_benchmark(relative_path)]
+            if bench_id is not None
+        }
         self.partial = self.destination.with_name(f"{self.destination.name}.partial-{os.getpid()}")
         self.queue: deque[str] = deque()
         self.queued: set[str] = set()
@@ -567,6 +661,15 @@ class PublicReleaseExporter:
                 digest.update(chunk)
             if digest.hexdigest() != expected:
                 raise ExportError(f"Pinned source changed: {relative_path}")
+        for relative_path, metadata in sorted(self.upstream_integrity_exceptions.items()):
+            source_path = self._source_path(relative_path)
+            if source_path.stat().st_size != metadata["size_bytes"]:
+                raise ExportError(f"Upstream integrity exception size changed: {relative_path}")
+            digest = hashlib.sha256()
+            for chunk in _iter_file_chunks(source_path):
+                digest.update(chunk)
+            if digest.hexdigest() != metadata["sha256"]:
+                raise ExportError(f"Upstream integrity exception bytes changed: {relative_path}")
 
     def validate_closure(self) -> dict[str, Any]:
         """Resolve the full public reference closure without linking, copying, or hashing artifacts."""
@@ -593,9 +696,10 @@ class PublicReleaseExporter:
                 self._enqueue_directory(PurePosixPath(relative_path).parent.as_posix())
             if relative_path.endswith(".json"):
                 json_files += 1
-                value = _load_json_file(source_path)
-                sanitized, _ = sanitize_json(value)
-                self._enqueue_references(sanitized)
+                values, _ = _load_json_document(source_path)
+                for value in values:
+                    sanitized, _ = sanitize_json(value)
+                    self._enqueue_references(sanitized)
         selection.update(
             {
                 "closure_files": len(seen),
@@ -988,7 +1092,41 @@ class PublicReleaseExporter:
     def _write_generated_json(self, relative_path: str, value: Any, discover: bool) -> None:
         """Write sanitized generated JSON without ever modifying a hard-linked source file."""
         sanitized, count = sanitize_json(value)
+        if self._should_annotate_upstream_integrity(relative_path):
+            sanitized, _ = self._annotate_upstream_integrity(sanitized)
         payload = _json_bytes(sanitized)
+        self._write_generated_json_payload(relative_path, payload, count)
+        if discover:
+            self._enqueue_references(sanitized)
+
+    def _write_generated_json_lines(
+        self,
+        relative_path: str,
+        values: list[Any],
+        discover: bool,
+    ) -> None:
+        """Write sanitized JSON Lines while retaining its one-value-per-line structure."""
+        sanitized_values: list[Any] = []
+        count = 0
+        for value in values:
+            sanitized, value_count = sanitize_json(value)
+            if self._should_annotate_upstream_integrity(relative_path):
+                sanitized, _ = self._annotate_upstream_integrity(sanitized)
+            sanitized_values.append(sanitized)
+            count += value_count
+        payload = _json_lines_bytes(sanitized_values)
+        self._write_generated_json_payload(relative_path, payload, count)
+        if discover:
+            for sanitized in sanitized_values:
+                self._enqueue_references(sanitized)
+
+    def _write_generated_json_payload(
+        self,
+        relative_path: str,
+        payload: bytes,
+        redactions: int,
+    ) -> None:
+        """Store pre-sanitized JSON bytes with copy-on-write accounting."""
         if _is_sensitive_match(payload):
             raise SecurityError(f"Credential-shaped content survived JSON sanitization: {relative_path}")
         target = self._destination_path(relative_path)
@@ -1000,9 +1138,52 @@ class PublicReleaseExporter:
             _atomic_replace_bytes(target, payload)
             self.exported.add(relative_path)
             self.generated_files += 1
-        self.redactions += count
-        if discover:
-            self._enqueue_references(sanitized)
+        self.redactions += redactions
+
+    def _should_annotate_upstream_integrity(self, relative_path: str) -> bool:
+        """Avoid a second JSON traversal outside benchmarks carrying known anomalies."""
+        if relative_path in self.policy.get("required_root_indexes", []):
+            return True
+        return self._scoped_benchmark(relative_path) in self.integrity_exception_benches
+
+    def _annotate_upstream_integrity(self, value: Any) -> tuple[Any, int]:
+        """Attach visible warnings to records that reference exact anomalous upstream bytes."""
+        count = 0
+
+        def visit(node: Any) -> None:
+            """Annotate the narrowest object carrying one exact exception path."""
+            nonlocal count
+            if isinstance(node, list):
+                for child in node:
+                    visit(child)
+                return
+            if not isinstance(node, dict):
+                return
+            for child in node.values():
+                visit(child)
+            matched_paths = {
+                child
+                for child in node.values()
+                if isinstance(child, str) and child in self.upstream_integrity_exceptions
+            }
+            if not matched_paths:
+                return
+            if len(matched_paths) != 1:
+                raise ExportError("One JSON record references multiple upstream integrity exceptions")
+            relative_path = next(iter(matched_paths))
+            exception = self.upstream_integrity_exceptions[relative_path]
+            node["integrity_status"] = "upstream-anomaly-pinned-v1"
+            node["integrity_handling"] = exception["handling"]
+            node["integrity_note_zh"] = exception["reason_zh"]
+            if exception["handling"] in {"opaque_archive_download", "truncated_media_download"}:
+                if "preview_kind" in node:
+                    node["preview_kind"] = "download_only"
+                if "preview_state" in node:
+                    node["preview_state"] = "download_only"
+            count += 1
+
+        visit(value)
+        return value, count
 
     def _hardlink(self, relative_path: str, source_path: Path) -> None:
         """Hard-link one unchanged source file and fail instead of copying across filesystems."""
@@ -1026,12 +1207,21 @@ class PublicReleaseExporter:
         if _is_preview_bundle_entry(relative_path):
             self._enqueue_directory(PurePosixPath(relative_path).parent.as_posix())
         if relative_path.endswith(".json"):
-            value = _load_json_file(source_path)
-            sanitized, count = sanitize_json(value)
-            self._enqueue_references(sanitized)
-            if count:
-                self.redactions += count
-                self._write_generated_json(relative_path, sanitized, discover=False)
+            values, is_json_lines = _load_json_document(source_path)
+            redactions = 0
+            annotations = 0
+            for value in values:
+                sanitized, count = sanitize_json(value)
+                annotation_count = 0
+                if self._should_annotate_upstream_integrity(relative_path):
+                    sanitized, annotation_count = self._annotate_upstream_integrity(sanitized)
+                redactions += count
+                annotations += annotation_count
+                self._enqueue_references(sanitized)
+            if (redactions or annotations) and is_json_lines:
+                self._write_generated_json_lines(relative_path, values, discover=False)
+            elif redactions or annotations:
+                self._write_generated_json(relative_path, values[0], discover=False)
             else:
                 self._hardlink(relative_path, source_path)
         else:
@@ -1258,7 +1448,8 @@ class PublicReleaseExporter:
             raw_payload = path.read_bytes()
             if not any(needle in raw_payload for needle in needles):
                 continue
-            value = _load_json_file(path)
+            values, is_json_lines = _load_json_document(path)
+            value: Any = values if is_json_lines else values[0]
             updated, synchronized = self._synchronize_chunk_metadata_in_json(
                 value,
                 changes,
@@ -1267,7 +1458,7 @@ class PublicReleaseExporter:
             if not synchronized:
                 continue
             sanitized, redactions = sanitize_json(updated)
-            payload = _json_bytes(sanitized)
+            payload = _json_lines_bytes(sanitized) if is_json_lines else _json_bytes(sanitized)
             if _is_sensitive_match(payload):
                 raise SecurityError(f"Credential-shaped content remains in {relative_path}")
             plans.append((relative_path, payload, redactions))
@@ -1429,8 +1620,28 @@ class PublicReleaseExporter:
             raise ExportError(f"Reserved generated path was exported too early: {PUBLIC_MANIFEST_PATH}")
         worker_count = min(4, max(1, os.cpu_count() or 1), max(1, len(paths)))
         chunksize = max(1, min(32, len(paths) // max(1, worker_count * 8)))
+        unknown_exceptions = set(self.upstream_integrity_exceptions) - {
+            relative_path for relative_path, _ in paths
+        }
+        if unknown_exceptions:
+            raise ExportError(
+                f"Opaque archive exceptions are absent from the public closure: {sorted(unknown_exceptions)}"
+            )
+        work_items = [
+            (
+                relative_path,
+                path,
+                (
+                    self.upstream_integrity_exceptions[relative_path]["sha256"]
+                    if self.upstream_integrity_exceptions.get(relative_path, {}).get("handling")
+                    == "opaque_archive_download"
+                    else None
+                ),
+            )
+            for relative_path, path in paths
+        ]
         with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as executor:
-            worker_results = list(executor.map(_hash_release_file, paths, chunksize=chunksize))
+            worker_results = list(executor.map(_hash_release_file, work_items, chunksize=chunksize))
         results_by_path: dict[str, tuple[int, str]] = {}
         for relative_path, file_size, digest in worker_results:
             if relative_path in results_by_path:
@@ -1451,6 +1662,14 @@ class PublicReleaseExporter:
                 "size": file_size,
             }
             entry.update(_content_metadata(relative_path))
+            if relative_path in self.upstream_integrity_exceptions:
+                exception = self.upstream_integrity_exceptions[relative_path]
+                entry["integrity_status"] = "upstream-anomaly-pinned-v1"
+                entry["integrity_handling"] = exception["handling"]
+                entry["public_note_zh"] = exception["reason_zh"]
+                entry["content_disposition"] = "attachment"
+                if exception["handling"] == "opaque_archive_download":
+                    entry["archive_scan"] = "opaque-upstream-bytes-pinned-v1"
             files.append(entry)
             total_bytes += file_size
         policy_sha256 = hashlib.sha256(self.policy_path.read_bytes()).hexdigest()

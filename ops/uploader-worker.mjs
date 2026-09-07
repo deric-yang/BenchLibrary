@@ -10,6 +10,9 @@ const MIN_PART_BYTES = 5 * 1024 * 1024;
 const MAX_PART_BYTES = 32 * 1024 * 1024;
 const MAX_MULTIPART_PARTS = 10000;
 const MAX_COMPLETION_BYTES = 8 * 1024 * 1024;
+// R2 single-part writes are capped at 5 GiB minus 5 MiB. Larger unchanged
+// objects must use the existing client multipart path instead of stream copy.
+const MAX_COPY_BYTES = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
 const INVENTORY_PAGE_SIZE = 1000;
 
 export default {
@@ -24,7 +27,12 @@ export default {
 
     try {
       if (url.pathname === "/_kwbl-upload/v1/health" && request.method === "GET") {
-        return json({ ok: true, prefix: env.UPLOAD_PREFIX });
+        const payload = { ok: true, prefix: env.UPLOAD_PREFIX };
+        const copySourcePrefix = configuredCopySourcePrefix(env.COPY_SOURCE_PREFIX, env.UPLOAD_PREFIX);
+        if (copySourcePrefix) {
+          payload.copy_source_prefix = copySourcePrefix;
+        }
+        return json(payload);
       }
       if (url.pathname === "/_kwbl-upload/v1/inventory") {
         if (request.method !== "GET") {
@@ -38,6 +46,19 @@ export default {
 
       if (url.pathname === "/_kwbl-upload/v1/object" && request.method === "PUT") {
         return await putObject(request, env.PUBLIC_CORPUS, objectKey);
+      }
+      if (url.pathname === "/_kwbl-upload/v1/copy" && request.method === "POST") {
+        const copySourcePrefix = configuredCopySourcePrefix(env.COPY_SOURCE_PREFIX, env.UPLOAD_PREFIX);
+        if (!copySourcePrefix) {
+          throw new ClientError(503, "Copy source is not configured");
+        }
+        return await copyObject(
+          request,
+          env.PUBLIC_CORPUS,
+          relativeKey,
+          objectKey,
+          copySourcePrefix,
+        );
       }
       if (url.pathname === "/_kwbl-upload/v1/multipart/init" && request.method === "POST") {
         return await initializeMultipart(request, env.PUBLIC_CORPUS, objectKey);
@@ -136,6 +157,18 @@ function validateUploadPrefix(uploadPrefix) {
   }
 }
 
+function configuredCopySourcePrefix(copySourcePrefix, uploadPrefix) {
+  validateUploadPrefix(uploadPrefix);
+  if (copySourcePrefix === undefined || copySourcePrefix === null || copySourcePrefix === "") {
+    return null;
+  }
+  validateUploadPrefix(copySourcePrefix);
+  if (copySourcePrefix === uploadPrefix) {
+    throw new Error("Copy source prefix must differ from the upload prefix");
+  }
+  return copySourcePrefix;
+}
+
 async function listInventory(url, bucket, uploadPrefix) {
   validateUploadPrefix(uploadPrefix);
   const cursor = url.searchParams.get("cursor");
@@ -166,6 +199,20 @@ async function listInventory(url, bucket, uploadPrefix) {
       custom_metadata: {
         sha256: typeof object.customMetadata?.sha256 === "string"
           ? object.customMetadata.sha256
+          : "",
+      },
+      http_metadata: {
+        cache_control: typeof object.httpMetadata?.cacheControl === "string"
+          ? object.httpMetadata.cacheControl
+          : "",
+        content_disposition: typeof object.httpMetadata?.contentDisposition === "string"
+          ? object.httpMetadata.contentDisposition
+          : "",
+        content_encoding: typeof object.httpMetadata?.contentEncoding === "string"
+          ? object.httpMetadata.contentEncoding
+          : "",
+        content_type: typeof object.httpMetadata?.contentType === "string"
+          ? object.httpMetadata.contentType
           : "",
       },
     };
@@ -235,6 +282,54 @@ async function putObject(request, bucket, objectKey) {
     throw new Error("R2 did not persist the complete object");
   }
   return json({ ok: true, skipped: false, size: stored.size, etag: stored.httpEtag });
+}
+
+async function copyObject(request, bucket, relativeKey, objectKey, copySourcePrefix) {
+  const expectedSize = Number(request.headers.get("X-KWBL-Object-Size"));
+  if (!Number.isSafeInteger(expectedSize) || expectedSize < 0 || expectedSize > MAX_COPY_BYTES) {
+    throw new ClientError(400, "Invalid copy object size");
+  }
+  const metadata = metadataFrom(request);
+  const existing = await bucket.head(objectKey);
+  if (storedObjectMatches(existing, expectedSize, metadata)) {
+    return json({
+      ok: true,
+      copied: false,
+      skipped: true,
+      size: existing.size,
+      sha256: metadata.sha256,
+    });
+  }
+
+  const sourceKey = validateObjectKey(relativeKey, copySourcePrefix);
+  const source = await bucket.head(sourceKey);
+  if (!storedContentMatches(source, expectedSize, metadata.sha256) || !validEtag(source.etag)) {
+    return json({ ok: true, copied: false, skipped: false, source_usable: false });
+  }
+  const sourceBody = await bucket.get(sourceKey, { onlyIf: { etagMatches: source.etag } });
+  if (
+    !storedContentMatches(sourceBody, expectedSize, metadata.sha256)
+    || !(sourceBody && "body" in sourceBody)
+    || sourceBody.body === undefined
+    || sourceBody.body === null
+  ) {
+    return json({ ok: true, copied: false, skipped: false, source_usable: false });
+  }
+
+  const stored = await bucket.put(objectKey, sourceBody.body, {
+    ...metadata.options,
+    sha256: metadata.sha256,
+  });
+  if (!storedObjectMatches(stored, expectedSize, metadata)) {
+    throw new Error("R2 copy failed its final metadata verification");
+  }
+  return json({
+    ok: true,
+    copied: true,
+    skipped: false,
+    size: stored.size,
+    sha256: metadata.sha256,
+  });
 }
 
 async function initializeMultipart(request, bucket, objectKey) {
@@ -386,7 +481,7 @@ async function multipartCompletionPayload(request) {
 }
 
 function storedObjectMatches(stored, expectedSize, metadata) {
-  if (!stored || stored.size !== expectedSize || stored.customMetadata?.sha256 !== metadata.sha256) {
+  if (!storedContentMatches(stored, expectedSize, metadata.sha256)) {
     return false;
   }
   const actual = stored.httpMetadata || {};
@@ -395,6 +490,14 @@ function storedObjectMatches(stored, expectedSize, metadata) {
     && actual.cacheControl === expected.cacheControl
     && (actual.contentEncoding || "") === (expected.contentEncoding || "")
     && (actual.contentDisposition || "") === (expected.contentDisposition || "");
+}
+
+function storedContentMatches(stored, expectedSize, expectedSha256) {
+  return Boolean(
+    stored
+    && stored.size === expectedSize
+    && stored.customMetadata?.sha256 === expectedSha256,
+  );
 }
 
 function response(status, body, extraHeaders = {}) {
