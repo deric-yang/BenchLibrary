@@ -59,7 +59,7 @@ function environment(inventoryPages = new Map(), fixture = {}) {
         size: data.byteLength,
         httpEtag: '"stored"',
         customMetadata: options.customMetadata,
-        httpMetadata: options.httpMetadata,
+        httpMetadata: fixture.directHttpMetadataOverride ?? options.httpMetadata,
       };
       objects.set(key, stored);
       return stored;
@@ -310,6 +310,24 @@ test("streams a validated public object into the release prefix", async () => {
   assert.equal(calls[1][3].sha256, createHash("sha256").update(payload).digest("hex"));
   assert.equal(calls[1][3].httpMetadata.contentEncoding, "gzip");
   assert.equal(calls[1][3].httpMetadata.contentDisposition, "attachment; filename=\"catalog.json\"");
+});
+
+test("rejects a direct object when R2 loses its declared HTTP metadata", async () => {
+  const { env } = environment(new Map(), { directHttpMetadataOverride: {} });
+  const response = await uploaderWorker.fetch(request("/_kwbl-upload/v1/object", {
+    method: "PUT",
+    key: "assets/metadata.bin",
+    body: "abc",
+    headers: {
+      "Content-Length": "3",
+      "X-KWBL-Cache-Control": "public, max-age=3600",
+      "X-KWBL-Content-Disposition": "attachment",
+      "X-KWBL-Content-Type": "application/octet-stream",
+      "X-KWBL-SHA256": "a".repeat(64),
+    },
+  }), env);
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), { ok: false, error: "Upload operation failed" });
 });
 
 test("copies an exact prior-release object without client retransmission", async () => {

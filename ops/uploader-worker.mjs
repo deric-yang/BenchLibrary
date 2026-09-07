@@ -278,8 +278,8 @@ async function putObject(request, bucket, objectKey) {
     ...metadata.options,
     sha256: metadata.sha256,
   });
-  if (stored === null || stored.size !== length) {
-    throw new Error("R2 did not persist the complete object");
+  if (!storedObjectMatches(stored, length, metadata)) {
+    throw new Error("R2 did not persist the complete object and metadata");
   }
   return json({ ok: true, skipped: false, size: stored.size, etag: stored.httpEtag });
 }
