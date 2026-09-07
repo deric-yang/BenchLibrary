@@ -144,6 +144,18 @@ KWBL_PUBLIC_RELEASE_ID="$KWBL_PUBLIC_RELEASE_ID" npm run deploy
 - `/data/*`、`/assets/*` 返回同一 release，原始 HTML/JavaScript/SVG/源码以文本或隔离安全预览提供；
 - 不出现登录页、Contributor Key、Hugging Face Token、内部路径、作业记录或服务端配置。
 
+先运行仓库内的匿名只读 smoke。它不会携带 Cookie 或凭据，也不会调用 Cloudflare 写接口；除 8 个小型
+代表原件/预览会完整下载并复算 SHA-256 外，4 个已固定的上游异常对象仅用 Range 校验：
+
+```bash
+python3 scripts/smoke_public_release.py \
+  --base-url https://benchlibrary.com \
+  --expected-release-id "$KWBL_PUBLIC_RELEASE_ID"
+```
+
+需要从开发机经显式公网代理执行时追加 `--proxy http://agent.baidu.com:8891`。脚本退出码非零即视为
+验收失败；浏览器人工检查负责补充搜索、Tab 切换与内嵌预览的交互验收。
+
 如任一项失败，不覆盖或删除新旧 R2 对象，直接把流量回滚到发布前记录的精确 Worker
 version。这样代码、静态资源和 `PUBLIC_RELEASE_ID` 会一起恢复，不会用“新代码 + 旧数据指针”
 拼出一个从未验收过的组合：
