@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -12,13 +14,21 @@ from unittest import mock
 
 import requests
 
+from scripts.create_one_time_upload_key import (
+    UploadTokenFileError,
+    UploadTokenUnlinkedSyncError,
+    create_one_time_upload_key,
+)
 from scripts.upload_public_release import (
+    CREDENTIAL_RETIREMENT_EXIT_CODE,
     CopySourceManifest,
     MultipartUploadMissing,
     PublicReleaseUploader,
     ReleaseFile,
     ReleaseManifest,
+    UploadCredentialRetirementFailure,
     UploadFailure,
+    cli,
     finalize_verified_upload,
     load_copy_source_manifest,
     load_manifest,
@@ -154,6 +164,76 @@ class FakeCopyUploader(PublicReleaseUploader):
 
 class UploadManifestTest(unittest.TestCase):
     """Ensure the manifest publishes and authenticates its own description."""
+
+    def test_uploader_requires_a_plain_https_origin(self) -> None:
+        """A one-time key can never be sent to HTTP or URL-embedded destinations."""
+        invalid_endpoints = (
+            "http://example.invalid",
+            "https://user@example.invalid",
+            "https://example.invalid/path",
+            "https://example.invalid?query=yes",
+            "https://example.invalid#fragment",
+            "https://example.invalid:invalid",
+            "https://example.invalid\\unexpected",
+            "https://例子.invalid",
+            " https://example.invalid",
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_path = Path(temporary_directory) / "state.jsonl"
+            for endpoint in invalid_endpoints:
+                with self.subTest(endpoint=endpoint):
+                    with self.assertRaisesRegex(UploadFailure, "HTTPS origin"):
+                        PublicReleaseUploader(
+                            endpoint,
+                            "x" * 64,
+                            None,
+                            state_path,
+                            "releases/test-release/",
+                        )
+
+            uploader = PublicReleaseUploader(
+                "HTTPS://example.invalid/",
+                "x" * 64,
+                None,
+                state_path,
+                "releases/test-release/",
+            )
+            self.assertEqual(uploader.endpoint, "HTTPS://example.invalid")
+
+    def test_uploader_never_follows_redirects_with_the_key(self) -> None:
+        """A 30x fails before Requests can replay the custom header elsewhere."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            uploader = PublicReleaseUploader(
+                "https://example.invalid",
+                "x" * 64,
+                None,
+                Path(temporary_directory) / "state.jsonl",
+                "releases/test-release/",
+            )
+            response = mock.Mock(
+                status_code=302,
+                headers={"Location": "http://redirect.invalid/capture"},
+            )
+            session = mock.Mock()
+            session.request.return_value = response
+
+            with (
+                mock.patch.object(uploader, "_session", return_value=session),
+                self.assertRaisesRegex(UploadFailure, "HTTP 302"),
+            ):
+                uploader.health()
+
+            session.request.assert_called_once()
+            request_kwargs = session.request.call_args.kwargs
+            self.assertIs(request_kwargs["allow_redirects"], False)
+            self.assertEqual(request_kwargs["headers"]["X-KWBL-Upload-Key"], "x" * 64)
+
+            with self.assertRaisesRegex(UploadFailure, "no-redirect policy"):
+                uploader._request_with_retry(
+                    "GET",
+                    "https://example.invalid/health",
+                    allow_redirects=True,
+                )
 
     def test_load_manifest_appends_self_with_computed_hash(self) -> None:
         """The non-recursive files list still results in uploading the manifest itself."""
@@ -778,7 +858,6 @@ class UploadManifestTest(unittest.TestCase):
             base = Path(temporary_directory)
             _root, manifest_path, manifest, _catalog_hash = self._release_fixture(base)
             token_path = base / "upload.key"
-            token_path.write_text("x" * 64, encoding="utf-8")
             inventory_path = base / "inventory.json"
             uploader = FakeInventoryUploader({
                 None: {
@@ -790,15 +869,15 @@ class UploadManifestTest(unittest.TestCase):
                 },
             })
 
-            with self.assertRaisesRegex(UploadFailure, "did not return a cursor"):
-                finalize_verified_upload(
-                    uploader,
-                    manifest,
-                    manifest_path,
-                    inventory_path,
-                    token_path,
-                    True,
-                )
+            with create_one_time_upload_key(token_path) as token_file:
+                with self.assertRaisesRegex(UploadFailure, "did not return a cursor"):
+                    finalize_verified_upload(
+                        uploader,
+                        manifest,
+                        manifest_path,
+                        inventory_path,
+                        token_file,
+                    )
 
             self.assertTrue(token_path.is_file())
             self.assertFalse(inventory_path.exists())
@@ -809,7 +888,6 @@ class UploadManifestTest(unittest.TestCase):
             base = Path(temporary_directory)
             root, manifest_path, manifest, catalog_hash = self._release_fixture(base)
             token_path = base / "upload.key"
-            token_path.write_text("x" * 64, encoding="utf-8")
             inventory_path = base / "inventory.json"
             uploader = FakeInventoryUploader({
                 None: {
@@ -825,15 +903,15 @@ class UploadManifestTest(unittest.TestCase):
                 },
             })
 
-            with self.assertRaisesRegex(UploadFailure, "inventory verification failed"):
-                finalize_verified_upload(
-                    uploader,
-                    manifest,
-                    manifest_path,
-                    inventory_path,
-                    token_path,
-                    True,
-                )
+            with create_one_time_upload_key(token_path) as token_file:
+                with self.assertRaisesRegex(UploadFailure, "inventory verification failed"):
+                    finalize_verified_upload(
+                        uploader,
+                        manifest,
+                        manifest_path,
+                        inventory_path,
+                        token_file,
+                    )
 
             self.assertTrue(token_path.is_file())
             self.assertTrue(inventory_path.is_file())
@@ -846,7 +924,6 @@ class UploadManifestTest(unittest.TestCase):
             base = Path(temporary_directory)
             _root, manifest_path, manifest, catalog_hash = self._release_fixture(base)
             token_path = base / "upload.key"
-            token_path.write_text("x" * 64, encoding="utf-8")
             inventory_path = base / "inventory.json"
             manifest_bytes = manifest_path.read_bytes()
             uploader = FakeInventoryUploader({
@@ -884,18 +961,190 @@ class UploadManifestTest(unittest.TestCase):
                 },
             })
 
-            result = finalize_verified_upload(
-                uploader,
-                manifest,
-                manifest_path,
-                inventory_path,
-                token_path,
-                True,
-            )
+            with create_one_time_upload_key(token_path) as token_file:
+                result = finalize_verified_upload(
+                    uploader,
+                    manifest,
+                    manifest_path,
+                    inventory_path,
+                    token_file,
+                )
 
             self.assertTrue(result["ok"])
             self.assertFalse(token_path.exists())
             self.assertEqual(result["files"], 2)
+
+    def test_finalizer_marks_unlinked_unsynced_token_as_non_retryable(self) -> None:
+        """A post-unlink fsync error preserves verified-upload state for automation."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            _root, manifest_path, manifest, _catalog_hash = self._release_fixture(base)
+            inventory_path = base / "inventory.json"
+            verification_result = {"ok": True, "files": 2, "bytes": 7}
+            uploader = mock.Mock()
+            uploader.fetch_complete_inventory.return_value = {
+                "schema_version": 1,
+                "complete": True,
+                "prefix": manifest.prefix,
+                "count": 0,
+                "bytes": 0,
+                "objects": [],
+            }
+            token_file = mock.Mock()
+
+            with (
+                mock.patch(
+                    "scripts.upload_public_release.verify_release",
+                    return_value=verification_result,
+                ),
+                mock.patch(
+                    "scripts.upload_public_release.delete_one_time_upload_key",
+                    side_effect=UploadTokenUnlinkedSyncError("simulated sync failure"),
+                ),
+                self.assertRaises(UploadCredentialRetirementFailure) as caught,
+            ):
+                finalize_verified_upload(
+                    uploader,
+                    manifest,
+                    manifest_path,
+                    inventory_path,
+                    token_file,
+                )
+
+            failure = caught.exception
+            self.assertTrue(failure.inventory_verified)
+            self.assertTrue(failure.token_file_unlinked)
+            self.assertFalse(failure.parent_fsync_completed)
+            self.assertFalse(failure.retry_upload)
+            self.assertEqual(failure.verification_result, verification_result)
+            self.assertIn("do not retry", str(failure))
+            self.assertTrue(inventory_path.is_file())
+
+    def test_finalizer_propagates_reconciled_unlink_interruption(self) -> None:
+        """A post-unlink cancellation stays non-retryable even after parent sync."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            _root, manifest_path, manifest, _catalog_hash = self._release_fixture(base)
+            inventory_path = base / "inventory.json"
+            verification_result = {"ok": True, "files": 2, "bytes": 7}
+            uploader = mock.Mock()
+            uploader.fetch_complete_inventory.return_value = {
+                "schema_version": 1,
+                "complete": True,
+                "prefix": manifest.prefix,
+                "count": 0,
+                "bytes": 0,
+                "objects": [],
+            }
+            interruption = UploadTokenUnlinkedSyncError(
+                "simulated post-unlink cancellation",
+                parent_fsync_completed=True,
+            )
+
+            with (
+                mock.patch(
+                    "scripts.upload_public_release.verify_release",
+                    return_value=verification_result,
+                ),
+                mock.patch(
+                    "scripts.upload_public_release.delete_one_time_upload_key",
+                    side_effect=interruption,
+                ),
+                self.assertRaises(UploadCredentialRetirementFailure) as caught,
+            ):
+                finalize_verified_upload(
+                    uploader,
+                    manifest,
+                    manifest_path,
+                    inventory_path,
+                    mock.Mock(),
+                )
+
+            failure = caught.exception
+            self.assertTrue(failure.inventory_verified)
+            self.assertTrue(failure.token_file_unlinked)
+            self.assertTrue(failure.parent_fsync_completed)
+            self.assertFalse(failure.retry_upload)
+            self.assertEqual(failure.verification_result, verification_result)
+            self.assertIn("reconciled after an interruption", str(failure))
+
+    def test_finalizer_preserves_unknown_retirement_state_without_retry(self) -> None:
+        """A failed identity check never turns verified inventory into another upload."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            _root, manifest_path, manifest, _catalog_hash = self._release_fixture(base)
+            inventory_path = base / "inventory.json"
+            verification_result = {"ok": True, "files": 2, "bytes": 7}
+            uploader = mock.Mock()
+            uploader.fetch_complete_inventory.return_value = {
+                "schema_version": 1,
+                "complete": True,
+                "prefix": manifest.prefix,
+                "count": 0,
+                "bytes": 0,
+                "objects": [],
+            }
+
+            with (
+                mock.patch(
+                    "scripts.upload_public_release.verify_release",
+                    return_value=verification_result,
+                ),
+                mock.patch(
+                    "scripts.upload_public_release.delete_one_time_upload_key",
+                    side_effect=UploadTokenFileError("simulated identity mismatch"),
+                ),
+                self.assertRaises(UploadCredentialRetirementFailure) as caught,
+            ):
+                finalize_verified_upload(
+                    uploader,
+                    manifest,
+                    manifest_path,
+                    inventory_path,
+                    mock.Mock(),
+                )
+
+            failure = caught.exception
+            self.assertTrue(failure.inventory_verified)
+            self.assertFalse(failure.token_file_unlinked)
+            self.assertIsNone(failure.parent_fsync_completed)
+            self.assertFalse(failure.retry_upload)
+            self.assertEqual(failure.verification_result, verification_result)
+
+    def test_cli_emits_structured_non_retryable_retirement_status(self) -> None:
+        """A supervisor can distinguish post-unlink failure without traceback parsing."""
+        states = (
+            (True, False, "upload_token_unlinked_parent_sync_failed"),
+            (True, True, "upload_token_unlinked_after_interruption"),
+            (False, None, "upload_token_retirement_failed"),
+        )
+        for token_file_unlinked, parent_fsync_completed, expected_code in states:
+            with self.subTest(
+                token_file_unlinked=token_file_unlinked,
+                parent_fsync_completed=parent_fsync_completed,
+            ):
+                failure = UploadCredentialRetirementFailure(
+                    "verified; token unlinked; retirement exceptional",
+                    token_file_unlinked=token_file_unlinked,
+                    parent_fsync_completed=parent_fsync_completed,
+                    verification_result={"ok": True, "files": 2, "bytes": 7},
+                )
+                stderr = io.StringIO()
+
+                with (
+                    mock.patch("scripts.upload_public_release.main", side_effect=failure),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    exit_code = cli([])
+
+                self.assertEqual(exit_code, CREDENTIAL_RETIREMENT_EXIT_CODE)
+                status = json.loads(stderr.getvalue())
+                self.assertFalse(status["ok"])
+                self.assertTrue(status["inventory_verified"])
+                self.assertIs(status["token_file_unlinked"], token_file_unlinked)
+                self.assertIs(status["parent_fsync_completed"], parent_fsync_completed)
+                self.assertFalse(status["retry_upload"])
+                self.assertEqual(status["code"], expected_code)
 
     @staticmethod
     def _release_fixture(base: Path) -> tuple[Path, Path, ReleaseManifest, str]:

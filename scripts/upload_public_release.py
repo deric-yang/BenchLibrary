@@ -14,17 +14,33 @@ import pathlib
 import random
 import re
 import stat
+import sys
 import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
+from urllib.parse import urlsplit
 
 import requests
 
 if __package__:
+    from .create_one_time_upload_key import (
+        UploadTokenFile,
+        UploadTokenFileError,
+        UploadTokenUnlinkedSyncError,
+        delete_one_time_upload_key,
+        read_one_time_upload_key,
+    )
     from .verify_r2_release import VerificationError, verify_release
 else:
+    from create_one_time_upload_key import (
+        UploadTokenFile,
+        UploadTokenFileError,
+        UploadTokenUnlinkedSyncError,
+        delete_one_time_upload_key,
+        read_one_time_upload_key,
+    )
     from verify_r2_release import VerificationError, verify_release
 
 
@@ -34,6 +50,7 @@ MAX_ATTEMPTS = 6
 MAX_INVENTORY_PAGES = 100000
 MAX_SERVER_COPY_BYTES = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
+CREDENTIAL_RETIREMENT_EXIT_CODE = 3
 ALLOWED_ROOTS = {"site", "data", "assets"}
 RELEASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -85,8 +102,78 @@ class UploadFailure(RuntimeError):
     """A bounded upload operation could not be completed."""
 
 
+class UploadCredentialRetirementFailure(UploadFailure):
+    """Inventory passed, but the one-time credential did not retire cleanly."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        token_file_unlinked: bool,
+        parent_fsync_completed: bool | None,
+        verification_result: dict[str, Any],
+    ) -> None:
+        """Expose machine-readable state so callers do not retry a finished upload."""
+        super().__init__(message)
+        self.inventory_verified = True
+        self.token_file_unlinked = token_file_unlinked
+        self.parent_fsync_completed = parent_fsync_completed
+        self.retry_upload = False
+        self.verification_result = verification_result
+
+    def as_status(self) -> dict[str, Any]:
+        """Return a secret-free status suitable for a supervising process."""
+        code = (
+            "upload_token_unlinked_parent_sync_failed"
+            if self.token_file_unlinked and self.parent_fsync_completed is False
+            else (
+                "upload_token_unlinked_after_interruption"
+                if self.token_file_unlinked and self.parent_fsync_completed is True
+                else "upload_token_retirement_failed"
+            )
+        )
+        return {
+            "code": code,
+            "inventory_verified": self.inventory_verified,
+            "message": str(self),
+            "ok": False,
+            "parent_fsync_completed": self.parent_fsync_completed,
+            "retry_upload": self.retry_upload,
+            "token_file_unlinked": self.token_file_unlinked,
+            "verification_result": self.verification_result,
+        }
+
+
 class MultipartUploadMissing(UploadFailure):
     """The R2 multipart upload expired or no longer exists."""
+
+
+def validate_upload_endpoint(endpoint: str) -> str:
+    """Require one credential-safe HTTPS origin with no redirect-prone suffix."""
+    if endpoint != endpoint.strip() or any(
+        not 33 <= ord(character) <= 126 for character in endpoint
+    ):
+        raise UploadFailure("Upload endpoint must be a clean HTTPS origin")
+    try:
+        parsed = urlsplit(endpoint)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError as error:
+        raise UploadFailure("Upload endpoint must be a valid HTTPS origin") from error
+    if (
+        parsed.scheme.lower() != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or not re.fullmatch(r"[A-Za-z0-9.:[\]-]+", parsed.netloc)
+    ):
+        raise UploadFailure(
+            "Upload endpoint must be an HTTPS origin without credentials, path, query, or fragment"
+        )
+    return endpoint.rstrip("/")
 
 
 def _valid_sha256(value: object) -> bool:
@@ -186,7 +273,7 @@ class PublicReleaseUploader:
         copy_source_prefix: str | None = None,
     ) -> None:
         """Initialize authenticated HTTP sessions and resumable local state."""
-        self.endpoint = endpoint.rstrip("/")
+        self.endpoint = validate_upload_endpoint(endpoint)
         self.token = token
         self.proxies = {"http": proxy, "https": proxy} if proxy else None
         self.state_path = state_path
@@ -457,6 +544,8 @@ class PublicReleaseUploader:
     def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         """Perform one bounded HTTP operation with fresh streaming bodies on retries."""
         data_factory = kwargs.pop("data_factory", None)
+        if "allow_redirects" in kwargs:
+            raise UploadFailure("Upload requests cannot override the no-redirect policy")
         last_error: Exception | None = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
@@ -466,6 +555,7 @@ class PublicReleaseUploader:
                         url,
                         proxies=self.proxies,
                         timeout=(20, 180),
+                        allow_redirects=False,
                         **kwargs,
                     )
                 else:
@@ -475,10 +565,11 @@ class PublicReleaseUploader:
                             url,
                             proxies=self.proxies,
                             timeout=(20, 180),
+                            allow_redirects=False,
                             data=payload,
                             **kwargs,
                         )
-                if response.status_code < 400:
+                if 200 <= response.status_code < 300:
                     return response
                 if response.status_code == 409:
                     try:
@@ -882,22 +973,42 @@ def finalize_verified_upload(
     manifest: ReleaseManifest,
     manifest_path: pathlib.Path,
     inventory_path: pathlib.Path,
-    token_path: pathlib.Path,
-    delete_token_on_success: bool,
+    token_file: UploadTokenFile,
 ) -> dict[str, Any]:
-    """Snapshot and verify all R2 objects before optionally deleting the one-time key."""
+    """Verify all R2 objects, then retire the exact one-time key that was read."""
     inventory = uploader.fetch_complete_inventory(manifest.prefix)
     write_atomic_inventory(inventory_path, inventory)
     try:
         result = verify_release(manifest_path, inventory_path)
     except VerificationError as error:
         raise UploadFailure(f"R2 release inventory verification failed: {error}") from error
-    if delete_token_on_success:
-        token_path.unlink(missing_ok=True)
+    try:
+        delete_one_time_upload_key(token_file)
+    except UploadTokenUnlinkedSyncError as error:
+        parent_fsync_completed = error.parent_fsync_completed
+        detail = (
+            "its parent directory was reconciled after an interruption"
+            if parent_fsync_completed
+            else "its parent directory did not fsync"
+        )
+        raise UploadCredentialRetirementFailure(
+            f"R2 inventory verified and the upload token was unlinked, but {detail}; "
+            "do not retry the upload with this credential",
+            token_file_unlinked=True,
+            parent_fsync_completed=parent_fsync_completed,
+            verification_result=result,
+        ) from error
+    except UploadTokenFileError as error:
+        raise UploadCredentialRetirementFailure(
+            f"R2 inventory verified, but upload token retirement failed: {error}",
+            token_file_unlinked=False,
+            parent_fsync_completed=None,
+            verification_result=result,
+        ) from error
     return result
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse upload, resume, and post-upload verification arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=pathlib.Path, required=True)
@@ -909,19 +1020,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--copy-source-manifest", type=pathlib.Path)
     parser.add_argument("--proxy")
     parser.add_argument("--workers", type=int, default=12)
-    parser.add_argument("--delete-token-on-success", action="store_true")
-    return parser.parse_args()
+    parser.add_argument(
+        "--delete-token-on-success",
+        action="store_true",
+        default=True,
+        help="Deprecated compatibility flag; verified uploads always retire their one-time key.",
+    )
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    """Upload one release, verify its complete R2 inventory, then retire its key."""
-    args = parse_args()
-    supplied_root = args.root.absolute()
-    if supplied_root.is_symlink():
-        raise UploadFailure(f"Release root cannot be a symlink: {supplied_root}")
-    root = supplied_root.resolve(strict=True)
-    manifest_path = (args.manifest or root / "data/public_manifest.json").resolve()
-    token_path = args.token_file.resolve()
+def _upload_with_token(
+    args: argparse.Namespace,
+    root: pathlib.Path,
+    manifest_path: pathlib.Path,
+    token_file: UploadTokenFile,
+) -> int:
+    """Run one upload while the validated token inode remains held open."""
+    token_path = validate_external_file_path(token_file.path, root, "Upload token")
     requested_state_path = (
         args.state_file.absolute()
         if args.state_file
@@ -936,11 +1051,10 @@ def main() -> int:
     inventory_path = validate_external_file_path(requested_inventory_path, root, "R2 inventory snapshot")
     if inventory_path.resolve(strict=False) == token_path:
         raise UploadFailure("R2 inventory snapshot cannot replace the upload token file")
+    if state_path.resolve(strict=False) == token_path:
+        raise UploadFailure("Upload state cannot replace the upload token file")
     if inventory_path.resolve(strict=False) == state_path.resolve(strict=False):
         raise UploadFailure("R2 inventory snapshot and upload state must use different paths")
-    token = token_path.read_text(encoding="utf-8").strip()
-    if len(token) < 32:
-        raise UploadFailure("Upload token file is empty or invalid")
     manifest = load_manifest(manifest_path, root)
     files = manifest.files
     copy_source = (
@@ -954,7 +1068,7 @@ def main() -> int:
     total_bytes = sum(item.size for item in files)
     uploader = PublicReleaseUploader(
         endpoint=args.endpoint,
-        token=token,
+        token=token_file.value,
         proxy=args.proxy,
         state_path=state_path,
         release_prefix=manifest.prefix,
@@ -1008,8 +1122,7 @@ def main() -> int:
         manifest,
         manifest_path,
         inventory_path,
-        token_path,
-        args.delete_token_on_success,
+        token_file,
     )
     print(
         f"R2 inventory verified: {verified['files']:,} files, {verified['bytes']:,} bytes; "
@@ -1019,5 +1132,30 @@ def main() -> int:
     return 0
 
 
+def main(argv: Sequence[str] | None = None) -> int:
+    """Upload one release, verify its complete R2 inventory, then retire its key."""
+    args = parse_args(argv)
+    supplied_root = args.root.absolute()
+    if supplied_root.is_symlink():
+        raise UploadFailure(f"Release root cannot be a symlink: {supplied_root}")
+    root = supplied_root.resolve(strict=True)
+    manifest_path = (args.manifest or root / "data/public_manifest.json").resolve()
+    try:
+        token_file = read_one_time_upload_key(args.token_file)
+    except UploadTokenFileError as error:
+        raise UploadFailure(str(error)) from error
+    with token_file:
+        return _upload_with_token(args, root, manifest_path, token_file)
+
+
+def cli(argv: Sequence[str] | None = None) -> int:
+    """Emit structured non-retryable state for post-verification retirement errors."""
+    try:
+        return main(argv)
+    except UploadCredentialRetirementFailure as error:
+        print(json.dumps(error.as_status(), sort_keys=True), file=sys.stderr)
+        return CREDENTIAL_RETIREMENT_EXIT_CODE
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

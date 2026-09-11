@@ -69,7 +69,7 @@ python3 scripts/export_public_release.py \
 KWBL_PUBLIC_RELEASE_ID=<validated-release-id> npm run deploy
 ```
 
-大体积数据必须先完成本地逐文件哈希复验、R2 上传与远端 inventory 校验，再切换 `PUBLIC_RELEASE_ID`。上传器会核对 manifest 中每个 `r2_key` 和临时端点的 immutable release 前缀，断点命中也不会跳过本地内容复验；断点状态保存在 release 目录之外。`ops/uploader-worker.mjs` 是仅用于首次/批量传输的临时、前缀受限上传器；它使用一次性随机密钥，传输完成后应删除 Worker 和密钥文件，不能作为生产写入口保留。
+大体积数据必须先完成本地逐文件哈希复验、R2 上传与远端 inventory 校验，再切换 `PUBLIC_RELEASE_ID`。上传器会核对 manifest 中每个 `r2_key` 和临时端点的 immutable release 前缀，断点命中也不会跳过本地内容复验；断点状态保存在 release 目录之外。`ops/uploader-worker.mjs` 是仅用于首次/批量传输的临时、前缀受限上传器；它使用 `scripts/create_one_time_upload_key.py` 在独立于 Git 的凭据目录自动创建一次性随机密钥，完整 inventory 核验成功后客户端会强制删除密钥文件。随后还应删除临时 Worker，不能把任何生产写入口保留下来。
 
 任何凭据只能通过 Cloudflare secret、短时会话或权限收敛的本机文件注入，不能写入 Git、发布 manifest、浏览器存储或日志。
 

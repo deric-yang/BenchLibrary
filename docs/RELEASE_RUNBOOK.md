@@ -38,6 +38,32 @@ Worker PUBLIC_RELEASE_ID 原子切换 ──失败──▶ 切回上一 release
 5. 当前策略中的 GDPval、OfficeQA Full / Pro V2、WorkBuddyBench Office、ArtifactsBench 和 GameCraft-Bench，均按最终公开发布确认进入 `full`；发布时仍须保留各自固定 revision 和上述归属信息。GameCraft-Bench 只发布固定仓库 revision 内的 140 个官方任务，排除 `tasks/example`，不执行上游脚本，也不镜像仓库外第三方素材池或演示站产物。
 6. 若固定 revision 的上游对象本身存在结构缺损，只能在 `upstream_integrity_exceptions` 中按路径、字节数与 SHA-256 精确登记。无效归档仅作为附件下载；截断媒体必须显示上游异常提示，不能伪装成完整预览。异常字节变化、恢复为可解析归档或离开公开闭包都会使导出失败。
 
+## 凭据模型与无人值守边界
+
+发布凭据分为互不复用的两层，任何一层都不得以“永久 Token”形式硬编码进代码、Git 历史、命令行参数、
+环境变量、日志、发布 manifest 或浏览器存储：
+
+- **Mac 控制面**只负责创建/删除临时 Worker、精确 path route 和切换正式 Worker 版本。持久授权应使用
+  Cloudflare OAuth refresh credential；首次人工授权完成后，refresh credential 只保存在 macOS Keychain，
+  短时 access token 只存在于刷新进程内存中。控制面请求通过显式代理
+  `http://agent.baidu.com:8891` 发出。正常发布不得再询问用户粘贴 Token。
+- **开发机数据面**只负责向本次 release 的固定前缀上传。每次自动生成全新的随机 uploader key；临时
+  Worker 的配置和持久态只保存 key 的 SHA-256；原值只在开发机权限收敛文件中落盘，传输期间仅存在于
+  TLS 保护的 HTTPS 请求和两端进程内存，不写日志或持久化。完整 inventory 核验成功后上传器强制销毁
+  原文件；此前失败则保留同一文件供断点续传，不能中途生成另一把 key。
+
+当前仓库实现并强制执行的是开发机数据面的完整闭环。控制面在统一 helper 落地前使用已经授权且能自行
+刷新会话的 Cloudflare MCP；若会话不存在或失效，应在创建任何写入口前 fail closed，不能退回到询问或
+写入永久 API Token。这里不直接封装当前固定 Wrangler 的首次 Keychain 初始化路径，因为该路径会把本地
+加密材料放入子进程 argv，不满足本项目的“secret 不进入 argv”约束。
+
+未来统一控制面 helper 必须同时满足以下约束后才能替代 MCP：通过 macOS Security.framework 原生 API
+读写 Keychain（不调用携带 secret 参数的 `security` 子进程）；在内存中完成 OAuth refresh 与 rotation；
+并发刷新使用单实例锁；代理显式配置且失败时不直连；权限和目标同时收敛到指定 account、zone、Worker 与
+route；日志只包含操作类型、非敏感目标、过期时间、请求 ID 和状态。未来若迁移到 Linux，只能接入
+Secret Service、kernel keyring 或同等的用户态最小权限 provider，并通过受限 fd/Unix socket 取短时
+credential；不得把 refresh/access token 放入环境变量、普通文件或进程参数。
+
 ## 标准发布流程
 
 以下命令应在开发机的干净 GitHub 工作区执行。变量名仅作示例，应为每次发布设置具体值：
@@ -48,7 +74,8 @@ KWBL_PUBLIC_RELEASE_ID="<yyyyMMddTHHmmssZ-public-vN>"
 KWBL_PUBLIC_RELEASE="/mnt/data/projects/bench-monitor/public-releases/$KWBL_PUBLIC_RELEASE_ID"
 KWBL_INTERNAL_UI="/mnt/data/projects/bench-monitor/current"
 KWBL_UPLOAD_ENDPOINT="https://<temporary-uploader-host>"
-KWBL_UPLOAD_TOKEN_FILE="/path/to/restricted/one-time-token"
+KWBL_UPLOAD_CREDENTIAL_DIR="/mnt/data/projects/.kw-bench-library-upload-credentials"
+KWBL_UPLOAD_TOKEN_FILE="$KWBL_UPLOAD_CREDENTIAL_DIR/$KWBL_PUBLIC_RELEASE_ID.key"
 KWBL_NETWORK_PROXY="http://agent.baidu.com:8891"
 KWBL_COPY_SOURCE_MANIFEST="/mnt/data/projects/bench-monitor/public-releases/<previous-release>/data/public_manifest.json"
 ```
@@ -180,13 +207,32 @@ python3 scripts/export_public_release.py \
 
 为本次 release 创建临时、仅允许写入 `releases/<release-id>/` 的上传端点和一次性随机密钥。使用 `ops/wrangler.uploader.jsonc`，把 `UPLOAD_PREFIX` 固定为新 release，把 `COPY_SOURCE_PREFIX` 固定为上一个已通过完整 inventory 核验的 release。密钥只能通过权限收敛的文件传入，不得写入 Git、manifest、日志或浏览器存储。
 
-密钥文件必须位于开发机、权限为 `0600`，并保存至少 32 字节的随机值。上传客户端会对文件内容执行
-`.strip()` 后再发送，因此写文件时不要保留末尾换行，或在计算 `UPLOAD_KEY_SHA256` 时对同一个去除首尾空白后的
-值计算 SHA-256；不能直接对带换行的文件做哈希。Cloudflare 配置和发布记录中只允许出现该 SHA-256，不能
-出现原始密钥。
+标准入口不接收人工输入的 uploader key。先创建一个仅当前开发机用户可写的独立目录，再由生成器用
+`O_EXCL | O_NOFOLLOW` 创建 64 字节、无换行、权限精确为 `0600` 的随机 key。命令唯一的 stdout 是
+`path`、`bytes` 和 `sha256` JSON，不包含原值；将其中 `sha256` 配置为临时 Worker 的
+`UPLOAD_KEY_SHA256`：
+
+```bash
+install -d -m 0700 "$KWBL_UPLOAD_CREDENTIAL_DIR"
+python3 scripts/create_one_time_upload_key.py \
+  --output "$KWBL_UPLOAD_TOKEN_FILE"
+```
+
+凭据目录必须独立于 Git；生成器与读取器都会逐层检查实际父目录中的 `.git` marker 和常规裸仓库结构并
+硬性拒绝，也会拒绝带 `GIT_DIR` 或 `GIT_WORK_TREE` 外部 Git 上下文的进程，不能依赖 `.gitignore`。因此，
+标准 worktree/裸仓库中的手工 key 也不能用于上传。Git 允许在完全不标记工作树目录的另一处元数据仓库中
+配置 `core.worktree`；单靠一个输出路径无法穷举全盘并证明这种非生效外部配置不存在，所以标准流程还固定
+使用专用凭据根目录，禁止把它配置成任何仓库的外部 worktree。生成器同时拒绝覆盖既有路径。重试同一个
+release 时必须复用该
+文件；只有新 release 才创建新路径。上传器通过
+保留的父目录 fd，以 `O_NOFOLLOW | O_NONBLOCK` 读取文件，并要求它是当前 uid 拥有、单硬链接、权限不宽于
+`0600` 的普通文件。仅为兼容旧文件，读取器会规范化首尾空白；新生成器始终写入无空白的精确值。Cloudflare
+配置和发布记录中只允许出现规范化后 key 的 SHA-256，不能出现原始 key。
 
 若临时端点复用生产域名，只挂载精确的 HTTPS path route
 `https://benchlibrary.com/_kwbl-upload/*`；不要创建无 scheme、全站或通配子域路由。上传前先验证无密钥访问返回 404、带密钥 health 返回精确新旧 prefix；清理时先删除这条 route，再删除临时 Worker。
+客户端的 `--endpoint` 只接受不含 userinfo、path、query 或 fragment 的 HTTPS origin；所有请求禁用重定向，
+任何 30x（包括跨域或降级到 HTTP）都会在发送后续请求前失败，避免自定义认证头泄露。
 
 若通过 Cloudflare API / MCP 直接上传临时 Worker，`ops/wrangler.uploader.jsonc` 中的
 `workers_dev=false` 与 `preview_urls=false` 不会自动成为 API 请求的一部分。Worker 模块上传成功后、创建
@@ -203,13 +249,38 @@ python3 scripts/upload_public_release.py \
   --token-file "$KWBL_UPLOAD_TOKEN_FILE" \
   --copy-source-manifest "$KWBL_COPY_SOURCE_MANIFEST" \
   --proxy "$KWBL_NETWORK_PROXY" \
-  --workers 12 \
-  --delete-token-on-success
+  --workers 12
 ```
 
 若 Cloudflare 内部复用在真实环境中持续失败，保持同一个新 release 与断点文件，去掉 `--copy-source-manifest` 后重跑即可全量直传；不要放宽 prefix、路径、SHA 或 inventory 校验来换取复用成功。
 
-上传器支持断点续传，并在结束时抓取完整 R2 inventory。切换前必须再做一次离线一一对应核验，包括 key、size、SHA-256 custom metadata 及 Content-Type、Cache-Control、Content-Encoding、Content-Disposition HTTP metadata：
+上传器支持断点续传，并在结束时抓取完整 R2 inventory。它会一直持有最初打开的 key inode；只有完整
+inventory 一一对应核验成功后，才重新核对父目录中的 dev/inode 并强制删除同一个文件。旧命令行中的
+`--delete-token-on-success` 仍可解析以兼容既有自动化，但现在是无须传入的同义参数，不存在保留 key 的
+成功路径。分页、上传或 inventory 核验失败时 key 保留，以便同一 release 安全续传。
+
+若 key 的 `unlink` 已成功（包括同一 inode 已被另一个受信进程移除）、但随后父目录 `fsync` 失败，上传器会
+把所有可捕获的异常与进程内取消信号转换为可判定的
+`UploadCredentialRetirementFailure`：`inventory_verified=True`、`token_file_unlinked=True`、
+`parent_fsync_completed=False`、`retry_upload=False`。这不属于“上传失败并保留 key”的情形：当前目录项已
+移除，但崩溃后的删除持久性无法证明。CLI 会以专用退出码 `3` 返回，并在 stderr 输出不含 secret 的同字段
+JSON，监督进程必须按 `retry_upload=False` 分流，不得把所有非零退出码统一重跑。此时应立即撤销临时
+route 和 Worker，确认凭据路径不存在并记录该状态，不得重建同路径 key。临时写入口清理完成后，已经通过
+的 R2 inventory 仍可作为后续发布判断依据。
+
+若中断恰好发生在 `unlink` 系统调用已经生效、但调用方尚未记录结果的窗口，上传器会通过保留的 inode 和
+父目录 fd 对账并再次 `fsync`。对账确认原 key 已无硬链接时同样返回专用退出码 `3` 和
+`retry_upload=False`；补充同步成功则报告 `parent_fsync_completed=True` 及
+`code=upload_token_unlinked_after_interruption`，补充同步失败则使用上述 `False` 状态。两者都不得重试上传。
+
+若 inode/path 身份复核等其他退休步骤失败，状态为 `token_file_unlinked=False`、
+`parent_fsync_completed=null`、`code=upload_token_retirement_failed`。此时 inventory 已验证，仍不得重传；先撤销
+临时 route 和 Worker，再按保留 fd 所记录的 inode 与实际路径人工排查并销毁残余 key。
+
+`SIGKILL`、主机掉电或内核崩溃无法由进程转换成上述结构化状态。因此监督进程也不得把“无结构化状态的未知
+退出”自动视为可重试：应先确认临时写入口、凭据路径与已验证 inventory 的实际状态，再由控制面恢复或清理。
+
+切换前必须再做一次离线一一对应核验，包括 key、size、SHA-256 custom metadata 及 Content-Type、Cache-Control、Content-Encoding、Content-Disposition HTTP metadata：
 
 ```bash
 python3 scripts/verify_r2_release.py \
