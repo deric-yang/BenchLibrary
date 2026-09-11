@@ -3840,7 +3840,12 @@ function findMirrorEntry(task, material, slot) {
     const previewRecord = findBestIndexedRecord(previewRecords, task, material, slot);
     let mirrorRecord = findBestIndexedRecord(mirrorRecords, task, material, slot);
     if (previewRecord && !mirrorRecord) {
-        mirrorRecord = findCompanionMirrorRecord(mirrorRecords, previewRecord);
+        mirrorRecord = findCompanionMirrorRecord(mirrorRecords, previewRecord, task, material, slot);
+    }
+    const materialRole = firstString(material?.raw?.role, material?.raw?.slot).toLocaleLowerCase();
+    const strictReference = slot === "output" && ["reference", "source"].includes(materialRole);
+    if (strictReference && (!previewRecord || !mirrorRecord)) {
+        return null;
     }
     if (previewRecord || mirrorRecord) {
         return {
@@ -3960,12 +3965,19 @@ function scoreIndexedRecord(record, task, material, slot) {
     return score;
 }
 
-function findCompanionMirrorRecord(records, previewRecord) {
+function findCompanionMirrorRecord(records, previewRecord, task, material, slot) {
     const sourceHash = firstString(previewRecord?.source_sha256, previewRecord?.sha256);
     const logicalPath = normalizePathValue(previewRecord?.logical_path);
+    const role = firstString(previewRecord?.role, previewRecord?.slot).toLocaleLowerCase();
+    const strictReference = slot === "output" && ["reference", "source"].includes(role);
     return records.find((record) => {
-        return (sourceHash && firstString(record?.sha256, record?.source_sha256) === sourceHash)
-            || (logicalPath && normalizePathValue(record?.logical_path) === logicalPath);
+        const recordHash = firstString(record?.sha256, record?.source_sha256);
+        const recordPath = normalizePathValue(record?.logical_path);
+        if (strictReference) {
+            return mirrorRecordMatchesContext(record, task, slot, material)
+                && Boolean(sourceHash && recordHash === sourceHash && logicalPath && recordPath === logicalPath);
+        }
+        return (sourceHash && recordHash === sourceHash) || (logicalPath && recordPath === logicalPath);
     }) || null;
 }
 
@@ -4050,10 +4062,30 @@ function mirrorRecordMatchesContext(entry, task, slot, material = null) {
     }
     const inputRoles = new Set(["input", "source", "reference", "context", "catalog"]);
     const outputRoles = new Set(["output", "artifact", "gold", "candidate", "deliverable"]);
-    if (slot === "output" && role === "reference") {
-        return isAcceptedHumanDeliverable(material, task);
+    if (slot === "output" && ["reference", "source"].includes(role)) {
+        return isAcceptedHumanDeliverable(material, task)
+            || strictReferenceRecordMatchesContext(entry, task, material);
     }
     return slot === "input" ? inputRoles.has(role) : outputRoles.has(role);
+}
+
+function strictReferenceRecordMatchesContext(entry, task, material) {
+    const status = firstString(entry?.status).toLocaleLowerCase();
+    if (status !== "ready" || !material) {
+        return false;
+    }
+    const canonicalTaskId = normalizeIdentity(task?.id);
+    const recordTaskId = normalizeIdentity(firstString(entry?.task_id, entry?.task_key, entry?.uid));
+    const sharedTaskIds = asArray(entry?.task_ids).map(normalizeIdentity).filter(Boolean);
+    if (!canonicalTaskId || (recordTaskId !== canonicalTaskId && !sharedTaskIds.includes(canonicalTaskId))) {
+        return false;
+    }
+    const materialPaths = extractStrongMaterialPaths(material);
+    const recordPaths = extractStrongRecordPaths(entry);
+    const pathMatched = materialPaths.some((path) => recordPaths.includes(path));
+    const materialHash = firstString(material?.raw?.sha256, material?.raw?.source_sha256);
+    const recordHash = firstString(entry?.source_sha256, entry?.sha256);
+    return Boolean(pathMatched && materialHash && recordHash === materialHash);
 }
 
 function isAcceptedHumanDeliverable(material, task) {
@@ -4257,7 +4289,9 @@ function extractExactPromptTranslation(raw) {
 }
 
 function extractExactTitleTranslation(raw) {
-    const direct = firstString(raw?.title_zh_exact, raw?.name_zh_exact);
+    const direct = [raw?.title_zh_exact, raw?.name_zh_exact]
+        .map((value) => firstString(value))
+        .find((value) => hasMeaningfulChinese(value));
     if (direct) {
         const status = firstString(raw?.title_translation_status, raw?.translation_status);
         if (!isExactTranslationStatus(status)) {
@@ -4283,9 +4317,22 @@ function extractExactTitleTranslation(raw) {
     ];
     for (const candidate of candidates) {
         const translation = normalizeExactTranslation(candidate, raw?.title_translation_status);
-        if (translation.text) {
+        if (translation.text && hasMeaningfulChinese(translation.text)) {
             return translation;
         }
+    }
+    const legacyStatus = firstString(raw?.title_translation_status, raw?.translation_status);
+    const legacy = [raw?.title_zh, raw?.name_zh]
+        .map((value) => firstString(value))
+        .find((value) => hasMeaningfulChinese(value));
+    if (isExactTranslationStatus(legacyStatus) && hasMeaningfulChinese(legacy)) {
+        const method = firstString(raw?.translation_method, raw?.title_translation_method);
+        return {
+            text: legacy,
+            status: legacyStatus,
+            isMachine: legacyStatus.toLocaleLowerCase().includes("machine")
+                || method.toLocaleLowerCase().includes("machine"),
+        };
     }
     return {text: "", status: "missing", isMachine: false};
 }
@@ -4319,6 +4366,10 @@ function isExactTranslationStatus(status) {
     return /^(?:exact|exact_machine_reviewable|verified_exact|human_exact|full|complete)$/i.test(
         String(status || "").trim(),
     );
+}
+
+function hasMeaningfulChinese(value) {
+    return (String(value || "").match(/[\u3400-\u9fff]/g) || []).length >= 2;
 }
 
 function isPrimarilyChinese(value) {

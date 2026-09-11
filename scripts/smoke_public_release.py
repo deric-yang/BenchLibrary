@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -100,6 +102,41 @@ class VariantCount:
 
 
 @dataclass(frozen=True)
+class GameCraftProbe:
+    """Describe the complete task, Gold, translation, and source contract."""
+
+    benchmark_id: str
+    source_revision: str
+    expected_task_directories: int
+    expected_family_counts: tuple[tuple[str, int], ...]
+    expected_status_counts: tuple[tuple[str, int], ...]
+    missing_gold_task_ids: tuple[str, ...]
+    expected_title_zh: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class DeclaredObjectProbe:
+    """Describe one object whose integrity metadata comes from a pinned task shard."""
+
+    label: str
+    path: str
+    size: int
+    sha256: str
+    require_preview_csp: bool = False
+
+
+@dataclass(frozen=True)
+class IndexBinding:
+    """Require one task-bound path in a particular public root index."""
+
+    label: str
+    kind: str
+    benchmark_id: str
+    task_id: str
+    path: str
+
+
+@dataclass(frozen=True)
 class ReleaseSpec:
     """Hold the auditable acceptance contract for a public release family."""
 
@@ -111,6 +148,7 @@ class ReleaseSpec:
     variant_counts: tuple[VariantCount, ...]
     object_probes: tuple[ObjectProbe, ...]
     anomaly_probes: tuple[AnomalyProbe, ...]
+    gamecraft_probe: GameCraftProbe | None = None
 
 
 GDPVAL_XLSX = (
@@ -150,10 +188,10 @@ ARTIFACTS_PREVIEW = (
 
 
 DEFAULT_SPEC = ReleaseSpec(
-    policy_id="kw-bench-library-public-v2",
-    catalog_benchmarks=31,
-    expanded_benchmarks=29,
-    full_records=10021,
+    policy_id="kw-bench-library-public-v3",
+    catalog_benchmarks=32,
+    expanded_benchmarks=30,
+    full_records=10161,
     task_probes=(
         TaskProbe(
             "GDPval",
@@ -310,6 +348,40 @@ DEFAULT_SPEC = ReleaseSpec(
             "4b894ae3-1f23-4560-b13d-07ed1132074e",
         ),
     ),
+    gamecraft_probe=GameCraftProbe(
+        benchmark_id="gamecraft-bench",
+        source_revision="a43347534374df9a0c1a6c001aa9380862783f6d",
+        expected_task_directories=141,
+        expected_family_counts=(
+            ("Card game", 5),
+            ("Horror", 5),
+            ("Idle", 4),
+            ("Open-world", 15),
+            ("Platformer", 19),
+            ("Puzzle", 8),
+            ("Racing", 4),
+            ("Rhythm", 5),
+            ("Roguelike", 14),
+            ("Shooter", 7),
+            ("Simulation", 6),
+            ("Sports", 4),
+            ("Strategy", 17),
+            ("Tycoon", 16),
+            ("Visual novel", 11),
+        ),
+        expected_status_counts=(
+            ("repository_files", 38),
+            ("generator_source_only", 98),
+            ("not_published", 4),
+        ),
+        missing_gold_task_ids=(
+            "sports-archery-quest",
+            "sports-boxing-gym",
+            "sports-fishing-tournament",
+            "sports-skateboard-park",
+        ),
+        expected_title_zh=(("horror-floor-13", "恐怖 13 层"),),
+    ),
 )
 
 
@@ -368,6 +440,7 @@ class AnonymousClient:
         self.timeout = timeout
         self.cache_bust = str(time.time_ns())
         self.session = session or requests.Session()
+        self.session.trust_env = False
         self.session.cookies.clear()
         self.session.headers.update(
             {
@@ -421,6 +494,8 @@ class PublicReleaseSmoke:
         self.spec = spec
         self.json_cache: dict[str, dict[str, Any]] = {}
         self.completed_checks: list[str] = []
+        self.declared_object_probes: list[DeclaredObjectProbe] = []
+        self.index_bindings: list[IndexBinding] = []
 
     def _json(self, path: str, label: str) -> dict[str, Any]:
         """Fetch and cache one JSON object by path."""
@@ -491,6 +566,11 @@ class PublicReleaseSmoke:
         expected_by_benchmark: dict[str, int] = {}
         for probe in self.spec.task_probes:
             expected_by_benchmark[probe.benchmark_id] = probe.expected_records
+        gamecraft_probe = self.spec.gamecraft_probe
+        if gamecraft_probe is not None:
+            expected_by_benchmark[gamecraft_probe.benchmark_id] = sum(
+                count for _status, count in gamecraft_probe.expected_status_counts
+            )
         for benchmark_id, expected_records in expected_by_benchmark.items():
             shard = self._json(f"data/benches/{benchmark_id}.json", f"{benchmark_id} task shard")
             _require(shard.get("benchmark_id") == benchmark_id, f"Wrong benchmark ID in {benchmark_id} shard")
@@ -521,6 +601,302 @@ class PublicReleaseSmoke:
             )
         self.completed_checks.append("release and task counts")
         return shards
+
+    @staticmethod
+    def _gamecraft_artifacts(task: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return one GameCraft task's materialized artifact records."""
+        artifacts = task.get("artifacts")
+        _require(isinstance(artifacts, dict), "GameCraft task artifacts are missing")
+        files = artifacts.get("files")
+        _require(isinstance(files, list), "GameCraft task artifact files must be an array")
+        _require(all(isinstance(record, dict) for record in files), "GameCraft artifact record is invalid")
+        return files
+
+    @staticmethod
+    def _artifact_with_path(
+        task: dict[str, Any],
+        repository_path: str,
+        role: str,
+    ) -> dict[str, Any] | None:
+        """Find one task artifact by exact repository path and semantic role."""
+        for record in PublicReleaseSmoke._gamecraft_artifacts(task):
+            if record.get("repository_path") == repository_path and record.get("role") == role:
+                return record
+        return None
+
+    @staticmethod
+    def _declared_object(
+        label: str,
+        record: dict[str, Any],
+        preview: bool = False,
+    ) -> DeclaredObjectProbe:
+        """Validate and capture one task-declared object without duplicating release-specific hashes."""
+        value = record.get("preview") if preview else record
+        _require(isinstance(value, dict), f"Declared object metadata is missing for {label}")
+        expected_status = "ready"
+        actual_status = (
+            value.get("status")
+            if preview
+            else record.get("mirror_status", record.get("status"))
+        )
+        _require(actual_status == expected_status, f"Declared object is not ready for {label}")
+        path = value.get("preview_url") if preview else value.get("url")
+        size = value.get("size_bytes")
+        digest = value.get("sha256")
+        _require(isinstance(path, str) and path.startswith("assets/"), f"Object path is invalid for {label}")
+        _require(
+            isinstance(size, int) and not isinstance(size, bool) and size > 0,
+            f"Object size is invalid for {label}",
+        )
+        _require(
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
+            f"Object SHA-256 is invalid for {label}",
+        )
+        preview_kind = str(value.get("preview_kind") or "") if preview else ""
+        return DeclaredObjectProbe(
+            label=label,
+            path=path,
+            size=size,
+            sha256=digest,
+            require_preview_csp=preview_kind == "html",
+        )
+
+    @staticmethod
+    def _gamecraft_sources(task: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """Return ready code and config source records for one GameCraft task."""
+        verifier = task.get("verifier")
+        _require(isinstance(verifier, dict), "GameCraft verifier is missing")
+        sources = verifier.get("sources")
+        _require(isinstance(sources, dict), "GameCraft verifier sources are missing")
+        result = {}
+        for kind in ("code", "config"):
+            record = sources.get(kind)
+            _require(isinstance(record, dict), f"GameCraft verifier {kind} source is missing")
+            _require(record.get("status") == "ready", f"GameCraft verifier {kind} source is not ready")
+            result[kind] = record
+        return result
+
+    @staticmethod
+    def _check_gamecraft_translation(task: dict[str, Any]) -> None:
+        """Require exact Chinese task and per-check translations for one English task."""
+        task_id = str(task.get("id") or "unknown")
+        _require(task.get("original_language") == "en", f"GameCraft task language is wrong: {task_id}")
+        for field in ("title_zh", "task_prompt_zh_exact"):
+            value = task.get(field)
+            _require(isinstance(value, str) and value.strip(), f"GameCraft {field} is missing: {task_id}")
+        _require(task.get("title_translation_status") == "exact", f"GameCraft title is not exact: {task_id}")
+        _require(task.get("translation_status") == "exact", f"GameCraft prompt is not exact: {task_id}")
+        verifier = task.get("verifier")
+        _require(isinstance(verifier, dict), f"GameCraft verifier is missing: {task_id}")
+        checks = verifier.get("checks")
+        _require(isinstance(checks, list) and checks, f"GameCraft verifier checks are missing: {task_id}")
+        for check in checks:
+            _require(isinstance(check, dict), f"GameCraft verifier check is invalid: {task_id}")
+            _require(
+                check.get("title_translation_status") == "exact",
+                f"GameCraft verifier title is not exact: {task_id}",
+            )
+            _require(
+                check.get("description_translation_status") == "exact",
+                f"GameCraft verifier description is not exact: {task_id}",
+            )
+            for field in ("title_zh", "description_zh"):
+                value = check.get(field)
+                _require(
+                    isinstance(value, str)
+                    and len(re.findall(r"[\u3400-\u9fff]", value)) >= 2,
+                    f"GameCraft verifier {field} has no meaningful Chinese text: {task_id}",
+                )
+
+    def _register_gamecraft_artifact(
+        self,
+        label: str,
+        benchmark_id: str,
+        task_id: str,
+        record: dict[str, Any],
+    ) -> None:
+        """Register one original and generated preview for index and byte-level checks."""
+        original = self._declared_object(f"{label} original", record)
+        preview = self._declared_object(f"{label} preview", record, preview=True)
+        _require(preview.require_preview_csp, f"GameCraft text preview is not sandboxed HTML: {label}")
+        self.declared_object_probes.extend((original, preview))
+        self.index_bindings.extend(
+            (
+                IndexBinding(label, "mirror", benchmark_id, task_id, original.path),
+                IndexBinding(label, "preview", benchmark_id, task_id, preview.path),
+            )
+        )
+
+    def _check_gamecraft_contract(self, shards: dict[str, dict[str, Any]]) -> None:
+        """Validate all GameCraft tasks and register representative public objects."""
+        probe = self.spec.gamecraft_probe
+        if probe is None:
+            return
+        shard = shards.get(probe.benchmark_id)
+        _require(isinstance(shard, dict), "GameCraft task shard was not loaded")
+        tasks = shard.get("tasks")
+        _require(isinstance(tasks, list), "GameCraft task shard has no task array")
+        task_by_id = {
+            str(task.get("id") or ""): task
+            for task in tasks
+            if isinstance(task, dict) and task.get("id")
+        }
+        _require(len(task_by_id) == len(tasks), "GameCraft task identities are missing or duplicated")
+        for task_id, expected_title in probe.expected_title_zh:
+            task = task_by_id.get(task_id)
+            _require(task is not None, f"GameCraft pinned-title task is missing: {task_id}")
+            _require(
+                task.get("title_zh") == expected_title,
+                f"GameCraft exact Chinese title is wrong: {task_id}",
+            )
+        census = shard.get("repository_task_census")
+        _require(isinstance(census, dict), "GameCraft repository census is missing")
+        _require(
+            census.get("source_revision") == probe.source_revision,
+            "GameCraft source revision is not the reviewed commit",
+        )
+        _require(
+            census.get("task_directories") == probe.expected_task_directories,
+            "GameCraft repository task-directory census is wrong",
+        )
+        _require(census.get("official_tasks") == len(tasks), "GameCraft repository census task count is wrong")
+        _require(census.get("excluded_examples") == ["tasks/example"], "GameCraft example exclusion is missing")
+        _require(census.get("reviewed_full_release") is True, "GameCraft source is not the reviewed full release")
+        family_counts = census.get("family_counts")
+        _require(
+            isinstance(family_counts, dict)
+            and family_counts == dict(probe.expected_family_counts),
+            "GameCraft family census differs from the reviewed release",
+        )
+
+        status_tasks: dict[str, list[dict[str, Any]]] = {}
+        for task in tasks:
+            _require(isinstance(task, dict), "GameCraft task record is invalid")
+            self._check_gamecraft_translation(task)
+            self._gamecraft_sources(task)
+            availability = task.get("gold_availability")
+            _require(isinstance(availability, dict), "GameCraft Gold availability marker is missing")
+            status = str(availability.get("status") or "")
+            availability_label = availability.get("label_zh")
+            _require(
+                isinstance(availability_label, str) and availability_label.strip(),
+                "GameCraft Gold availability explanation is missing",
+            )
+            status_tasks.setdefault(status, []).append(task)
+
+            task_id = str(task.get("id") or "")
+            task_root = f"tasks/{task_id}"
+            solve_path = f"{task_root}/solution/solve.sh"
+            own_files = [
+                record
+                for record in self._gamecraft_artifacts(task)
+                if str(record.get("repository_path") or "").startswith(f"{task_root}/")
+            ]
+            gold_records = [record for record in own_files if record.get("role") == "gold"]
+            if status == "repository_files":
+                _require(gold_records, f"GameCraft repository Gold files are missing: {task_id}")
+                project_path = f"{task_root}/solution/files/project.godot"
+                _require(
+                    self._artifact_with_path(task, project_path, "gold") is not None,
+                    f"GameCraft Gold project.godot is missing: {task_id}",
+                )
+                _require(
+                    self._artifact_with_path(task, solve_path, "reference") is not None,
+                    f"GameCraft solve.sh reference is missing: {task_id}",
+                )
+            elif status == "generator_source_only":
+                _require(not gold_records, f"GameCraft generator-only task claims Gold files: {task_id}")
+                _require(
+                    self._artifact_with_path(task, solve_path, "reference") is not None,
+                    f"GameCraft generator solve.sh reference is missing: {task_id}",
+                )
+            elif status == "not_published":
+                _require(
+                    "未发布" in availability_label,
+                    f"GameCraft missing-Gold explanation is unclear: {task_id}",
+                )
+                _require(not gold_records, f"GameCraft missing-Gold task claims Gold files: {task_id}")
+                _require(
+                    self._artifact_with_path(task, solve_path, "attachment") is not None,
+                    f"GameCraft empty solve.sh placeholder is missing: {task_id}",
+                )
+            else:
+                raise SmokeFailure(f"Unexpected GameCraft Gold availability status: {status!r}")
+
+        actual_counts = Counter({status: len(values) for status, values in status_tasks.items()})
+        expected_counts = Counter(dict(probe.expected_status_counts))
+        _require(actual_counts == expected_counts, f"GameCraft Gold status census is wrong: {dict(actual_counts)}")
+        missing_ids = {
+            str(task.get("id") or "") for task in status_tasks.get("not_published", [])
+        }
+        _require(
+            missing_ids == set(probe.missing_gold_task_ids),
+            f"GameCraft missing-Gold task set is wrong: {sorted(missing_ids)}",
+        )
+
+        repository_tasks = sorted(status_tasks["repository_files"], key=lambda task: str(task["id"]))
+        generator_tasks = sorted(status_tasks["generator_source_only"], key=lambda task: str(task["id"]))
+        project_task = repository_tasks[0]
+        project_task_id = str(project_task["id"])
+        project_path = f"tasks/{project_task_id}/solution/files/project.godot"
+        project = self._artifact_with_path(project_task, project_path, "gold")
+        _require(project is not None, "GameCraft representative Gold project is missing")
+        self._register_gamecraft_artifact(
+            "GameCraft real Gold project",
+            probe.benchmark_id,
+            project_task_id,
+            project,
+        )
+
+        script_pair = next(
+            (
+                (task, record)
+                for task in repository_tasks
+                for record in self._gamecraft_artifacts(task)
+                if record.get("role") == "gold"
+                and str(record.get("repository_path") or "").endswith(".gd")
+            ),
+            None,
+        )
+        _require(script_pair is not None, "GameCraft representative Gold GDScript is missing")
+        script_task, script = script_pair
+        self._register_gamecraft_artifact(
+            "GameCraft Gold GDScript",
+            probe.benchmark_id,
+            str(script_task["id"]),
+            script,
+        )
+
+        generator_task = generator_tasks[0]
+        generator_task_id = str(generator_task["id"])
+        solve = self._artifact_with_path(
+            generator_task,
+            f"tasks/{generator_task_id}/solution/solve.sh",
+            "reference",
+        )
+        _require(solve is not None, "GameCraft representative solve.sh reference is missing")
+        self._register_gamecraft_artifact(
+            "GameCraft generator solve.sh",
+            probe.benchmark_id,
+            generator_task_id,
+            solve,
+        )
+
+        verifier_sources = self._gamecraft_sources(project_task)
+        for kind in ("code", "config"):
+            label = f"GameCraft Verifier {kind}"
+            source_probe = self._declared_object(label, verifier_sources[kind])
+            self.declared_object_probes.append(source_probe)
+            self.index_bindings.append(
+                IndexBinding(
+                    label,
+                    "verifier",
+                    probe.benchmark_id,
+                    project_task_id,
+                    source_probe.path,
+                )
+            )
+        self.completed_checks.append("GameCraft task, Gold, translation, and Verifier contracts")
 
     def _records_for_task(
         self,
@@ -563,11 +939,43 @@ class PublicReleaseSmoke:
                 return record
         return None
 
+    @staticmethod
+    def _matching_verifier_record(
+        records: list[dict[str, Any]],
+        path: str,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        """Return one task-bound Verifier record whose nested source names a path."""
+        for record in records:
+            task_ids = record.get("task_ids")
+            has_task = record.get("task_id") == task_id or (
+                isinstance(task_ids, list) and task_id in task_ids
+            )
+            if not has_task:
+                continue
+            if path in _record_paths(record):
+                return record
+            sources = record.get("sources")
+            if not isinstance(sources, dict):
+                continue
+            if any(
+                isinstance(source, dict) and source.get("url") == path
+                for source in sources.values()
+            ):
+                return record
+        return None
+
     def _check_indexes(self) -> None:
         """Verify representative mappings and pinned anomaly presentation."""
         mirror_index = self._json("assets/mirror_index.json", "mirror root index")
         preview_index = self._json("assets/preview_index.json", "preview root index")
-        for label, index in (("mirror", mirror_index), ("preview", preview_index)):
+        verifier_index = self._json("assets/verifier_source_index.json", "Verifier source root index")
+        indexes = {
+            "mirror": mirror_index,
+            "preview": preview_index,
+            "verifier": verifier_index,
+        }
+        for label, index in indexes.items():
             public_release = index.get("public_release")
             _require(isinstance(public_release, dict), f"{label} index public_release is missing")
             _require(
@@ -596,6 +1004,20 @@ class PublicReleaseSmoke:
                 self._matching_record(preview_records, probe.preview_path, probe.task_id) is not None,
                 f"Preview index does not bind {probe.label} to its preview",
             )
+
+        for binding in self.index_bindings:
+            index = indexes[binding.kind]
+            records = self._records_for_task(
+                index,
+                binding.kind,
+                binding.benchmark_id,
+                binding.task_id,
+            )
+            if binding.kind == "verifier":
+                matched = self._matching_verifier_record(records, binding.path, binding.task_id)
+            else:
+                matched = self._matching_record(records, binding.path, binding.task_id)
+            _require(matched is not None, f"{binding.kind} index does not bind {binding.label}")
 
         mirror_records = [record for record in mirror_index["records"] if isinstance(record, dict)]
         preview_records = [record for record in preview_index["records"] if isinstance(record, dict)]
@@ -696,22 +1118,76 @@ class PublicReleaseSmoke:
                 anomaly.magic,
                 require_attachment=True,
             )
+
+        for probe in self.declared_object_probes:
+            range_size = min(RANGE_BYTES, probe.size)
+            response = self.client.get(
+                f"/{probe.path}",
+                headers={"Range": f"bytes=0-{range_size - 1}"},
+            )
+            _require(response.status_code == 206, f"Range request failed for {probe.label}")
+            _require(len(response.content) == range_size, f"Range body length is wrong for {probe.label}")
+            _require(
+                response.headers.get("Content-Range") == f"bytes 0-{range_size - 1}/{probe.size}",
+                f"Content-Range is wrong for {probe.label}",
+            )
+            _require(
+                response.headers.get("X-Content-SHA256") == probe.sha256,
+                f"SHA header is wrong for {probe.label}",
+            )
+            _require(
+                response.headers.get("X-Content-Type-Options", "").lower() == "nosniff",
+                f"nosniff header is missing for {probe.label}",
+            )
+            _require(
+                response.headers.get("Cross-Origin-Resource-Policy", "").lower() == "same-origin",
+                f"Cross-Origin-Resource-Policy is wrong for {probe.label}",
+            )
+            _require(bool(response.headers.get("Content-Type")), f"Content-Type is missing for {probe.label}")
+            if probe.require_preview_csp:
+                content_security_policy = response.headers.get("Content-Security-Policy", "")
+                _require(
+                    "sandbox allow-scripts" in content_security_policy,
+                    f"Preview sandbox is missing for {probe.label}",
+                )
+                _require(
+                    "connect-src 'none'" in content_security_policy,
+                    f"Preview network lock is missing for {probe.label}",
+                )
+                _require(
+                    "allow-same-origin" not in content_security_policy,
+                    f"Preview allows same-origin for {probe.label}",
+                )
+            full_response = self.client.get(f"/{probe.path}")
+            _require(full_response.status_code == 200, f"Full object request failed for {probe.label}")
+            _require(len(full_response.content) == probe.size, f"Full body size is wrong for {probe.label}")
+            _require(
+                full_response.content.startswith(response.content),
+                f"Range body differs from full body for {probe.label}",
+            )
+            digest = hashlib.sha256(full_response.content).hexdigest()
+            _require(digest == probe.sha256, f"Full body SHA-256 is wrong for {probe.label}")
         self.completed_checks.append("representative originals and previews")
 
     def run(self) -> dict[str, Any]:
         """Run all checks and return a machine-readable success summary."""
         self._check_home()
-        self._check_catalog()
+        shards = self._check_catalog()
+        self._check_gamecraft_contract(shards)
         self._check_indexes()
         self._check_objects()
+        benchmarks_checked = {probe.benchmark_id for probe in self.spec.task_probes}
+        if self.spec.gamecraft_probe is not None:
+            benchmarks_checked.add(self.spec.gamecraft_probe.benchmark_id)
         return {
             "ok": True,
             "base_url": self.client.base_url,
             "release_id": self.expected_release_id,
             "checks": self.completed_checks,
-            "benchmarks_checked": sorted({probe.benchmark_id for probe in self.spec.task_probes}),
-            "representative_tasks": len(self.spec.task_probes),
+            "benchmarks_checked": sorted(benchmarks_checked),
+            "representative_tasks": len(self.spec.task_probes) + int(self.spec.gamecraft_probe is not None),
             "objects_full_hash_checked": len(self.spec.object_probes),
+            "gamecraft_objects_full_hash_checked": len(self.declared_object_probes),
             "upstream_anomalies_checked": len(self.spec.anomaly_probes),
         }
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -13,8 +14,11 @@ from requests.structures import CaseInsensitiveDict
 from scripts.smoke_public_release import (
     DEFAULT_SPEC,
     PRIVATE_PATHS,
+    AnonymousClient,
     AnomalyProbe,
+    GameCraftProbe,
     ObjectProbe,
+    PublicReleaseSmoke,
     ReleaseSpec,
     SmokeFailure,
     TaskProbe,
@@ -261,6 +265,11 @@ class PublicReleaseSmokeTest(unittest.TestCase):
         }
         self.session.routes[("/assets/mirror_index.json", None)] = self._json_response(mirror_root)
         self.session.routes[("/assets/preview_index.json", None)] = self._json_response(preview_root)
+        self.session.routes[("/assets/verifier_source_index.json", None)] = self._json_response({
+            "public_release": {"release_id": self.release_id},
+            "records": [],
+            "record_shards": {},
+        })
         self.session.routes[("/assets/index_shards/mirror/sample-task.json", None)] = self._json_response({
             "records": [{"view_path": self.original_path, "task_id": "task-1"}],
         })
@@ -457,6 +466,10 @@ class PublicReleaseSmokeTest(unittest.TestCase):
     def test_default_spec_covers_requested_public_release(self) -> None:
         """The checked-in production contract names every requested benchmark."""
         benchmarks = {probe.benchmark_id for probe in DEFAULT_SPEC.task_probes}
+        gamecraft = DEFAULT_SPEC.gamecraft_probe
+        self.assertIsNotNone(gamecraft)
+        if gamecraft is not None:
+            benchmarks.add(gamecraft.benchmark_id)
         office_variants = {
             (variant.variant_id, variant.unit_kind, variant.count)
             for variant in DEFAULT_SPEC.variant_counts
@@ -465,7 +478,13 @@ class PublicReleaseSmokeTest(unittest.TestCase):
 
         self.assertEqual(
             benchmarks,
-            {"gdpval", "officeqa", "workbuddybench-office", "artifactsbench"},
+            {
+                "artifactsbench",
+                "gamecraft-bench",
+                "gdpval",
+                "officeqa",
+                "workbuddybench-office",
+            },
         )
         self.assertEqual(
             office_variants,
@@ -477,6 +496,253 @@ class PublicReleaseSmokeTest(unittest.TestCase):
         )
         self.assertEqual(len(DEFAULT_SPEC.object_probes), 8)
         self.assertEqual(len(DEFAULT_SPEC.anomaly_probes), 4)
+        self.assertEqual(DEFAULT_SPEC.policy_id, "kw-bench-library-public-v3")
+        self.assertEqual(DEFAULT_SPEC.catalog_benchmarks, 32)
+        self.assertEqual(DEFAULT_SPEC.expanded_benchmarks, 30)
+        self.assertEqual(DEFAULT_SPEC.full_records, 10161)
+        if gamecraft is not None:
+            self.assertEqual(
+                gamecraft.source_revision,
+                "a43347534374df9a0c1a6c001aa9380862783f6d",
+            )
+            self.assertEqual(gamecraft.expected_task_directories, 141)
+            self.assertEqual(len(gamecraft.expected_family_counts), 15)
+            self.assertEqual(sum(dict(gamecraft.expected_family_counts).values()), 140)
+            self.assertEqual(gamecraft.expected_title_zh, (("horror-floor-13", "恐怖 13 层"),))
+            self.assertEqual(dict(gamecraft.expected_status_counts), {
+                "generator_source_only": 98,
+                "not_published": 4,
+                "repository_files": 38,
+            })
+            self.assertEqual(len(gamecraft.missing_gold_task_ids), 4)
+
+    def test_anonymous_client_disables_environment_auth_discovery(self) -> None:
+        """Netrc credentials and environment proxies cannot enter an anonymous smoke request."""
+        self.session.trust_env = True
+
+        AnonymousClient(
+            "https://public.example",
+            1,
+            proxy="http://explicit-proxy.example:8080",
+            session=self.session,
+        )
+
+        self.assertFalse(self.session.trust_env)
+        self.assertEqual(
+            self.session.proxies,
+            {
+                "http": "http://explicit-proxy.example:8080",
+                "https": "http://explicit-proxy.example:8080",
+            },
+        )
+
+
+class GameCraftContractTest(unittest.TestCase):
+    """Exercise the GameCraft-specific semantic and dynamic-object contract."""
+
+    @staticmethod
+    def _artifact(task_id: str, relative_path: str, role: str) -> dict[str, Any]:
+        """Return one ready task artifact plus a sandboxed HTML preview."""
+        digest = hashlib.sha256(f"{task_id}:{relative_path}".encode()).hexdigest()
+        source = f"assets/mirrors/sample/{role}/{task_id}/{digest}/{relative_path.rsplit('/', 1)[-1]}"
+        preview = f"assets/previews/html/{digest}/index.html"
+        return {
+            "filename": relative_path.rsplit("/", 1)[-1],
+            "repository_path": f"tasks/{task_id}/{relative_path}",
+            "role": role,
+            "mirror_status": "ready",
+            "url": source,
+            "size_bytes": 64,
+            "sha256": digest,
+            "preview": {
+                "status": "ready",
+                "preview_url": preview,
+                "preview_kind": "html",
+                "size_bytes": 96,
+                "sha256": hashlib.sha256(f"preview:{digest}".encode()).hexdigest(),
+            },
+        }
+
+    @staticmethod
+    def _verifier_sources(task_id: str) -> dict[str, dict[str, Any]]:
+        """Return ready code and config records for one fixture task."""
+        result = {}
+        for kind in ("code", "config"):
+            digest = hashlib.sha256(f"{task_id}:{kind}".encode()).hexdigest()
+            result[kind] = {
+                "status": "ready",
+                "url": f"assets/verifiers/{kind}/sample/{digest}.txt",
+                "size_bytes": 72,
+                "sha256": digest,
+            }
+        return result
+
+    def _task(
+        self,
+        task_id: str,
+        status: str,
+        artifacts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return one exactly translated GameCraft-like task record."""
+        availability_label = "官方未发布实际 Gold。" if status == "not_published" else "可用性说明"
+        return {
+            "id": task_id,
+            "original_language": "en",
+            "title_zh": "中文标题",
+            "task_prompt_zh_exact": "完整中文题面",
+            "title_translation_status": "exact",
+            "translation_status": "exact",
+            "gold_availability": {"status": status, "label_zh": availability_label},
+            "artifacts": {"files": artifacts},
+            "verifier": {
+                "checks": [
+                    {
+                        "title_zh": "检查标题",
+                        "description_zh": "检查内容",
+                        "title_translation_status": "exact",
+                        "description_translation_status": "exact",
+                    }
+                ],
+                "sources": self._verifier_sources(task_id),
+            },
+        }
+
+    def setUp(self) -> None:
+        """Build a three-state GameCraft shard without requiring HTTP routes."""
+        self.gold_task_id = "platformer-gold"
+        self.generator_task_id = "puzzle-generator"
+        self.missing_task_id = "sports-missing"
+        gold_artifacts = [
+            self._artifact(self.gold_task_id, "solution/files/project.godot", "gold"),
+            self._artifact(self.gold_task_id, "solution/files/main.gd", "gold"),
+            self._artifact(self.gold_task_id, "solution/solve.sh", "reference"),
+        ]
+        generator_artifacts = [
+            self._artifact(self.generator_task_id, "solution/solve.sh", "reference"),
+        ]
+        missing_artifacts = [
+            self._artifact(self.missing_task_id, "solution/solve.sh", "attachment"),
+        ]
+        self.shard = {
+            "benchmark_id": "sample",
+            "record_count": 3,
+            "repository_task_census": {
+                "source_revision": "a" * 40,
+                "task_directories": 4,
+                "official_tasks": 3,
+                "excluded_examples": ["tasks/example"],
+                "family_counts": {"Fixture": 3},
+                "reviewed_full_release": True,
+            },
+            "tasks": [
+                self._task(self.gold_task_id, "repository_files", gold_artifacts),
+                self._task(self.generator_task_id, "generator_source_only", generator_artifacts),
+                self._task(self.missing_task_id, "not_published", missing_artifacts),
+            ],
+        }
+        spec = ReleaseSpec(
+            policy_id="sample-v3",
+            catalog_benchmarks=1,
+            expanded_benchmarks=1,
+            full_records=3,
+            task_probes=(),
+            variant_counts=(),
+            object_probes=(),
+            anomaly_probes=(),
+            gamecraft_probe=GameCraftProbe(
+                benchmark_id="sample",
+                source_revision="a" * 40,
+                expected_task_directories=4,
+                expected_family_counts=(("Fixture", 3),),
+                expected_status_counts=(
+                    ("repository_files", 1),
+                    ("generator_source_only", 1),
+                    ("not_published", 1),
+                ),
+                missing_gold_task_ids=(self.missing_task_id,),
+                expected_title_zh=((self.gold_task_id, "中文标题"),),
+            ),
+        )
+        client = AnonymousClient("https://public.example", 1, session=FakeSession())
+        self.smoke = PublicReleaseSmoke(client, "release-v3", spec=spec)
+
+    def test_registers_gold_generator_verifier_and_godot_previews(self) -> None:
+        """Representative objects and all semantic Gold states are registered."""
+        self.smoke._check_gamecraft_contract({"sample": self.shard})
+
+        self.assertEqual(len(self.smoke.declared_object_probes), 8)
+        self.assertEqual(len(self.smoke.index_bindings), 8)
+        labels = {probe.label for probe in self.smoke.declared_object_probes}
+        self.assertIn("GameCraft real Gold project original", labels)
+        self.assertIn("GameCraft Gold GDScript preview", labels)
+        self.assertIn("GameCraft generator solve.sh original", labels)
+        self.assertIn("GameCraft Verifier code", labels)
+        self.assertIn("GameCraft Verifier config", labels)
+
+    def test_rejects_missing_gold_task_presented_as_reference(self) -> None:
+        """An empty Oracle placeholder cannot be relabeled as a reference or Gold."""
+        missing_task = self.shard["tasks"][2]
+        missing_task["artifacts"]["files"][0]["role"] = "reference"
+
+        with self.assertRaisesRegex(SmokeFailure, "empty solve.sh placeholder"):
+            self.smoke._check_gamecraft_contract({"sample": self.shard})
+
+    def test_rejects_untranslated_verifier_bullet(self) -> None:
+        """Every GameCraft rubric bullet must retain an exact Chinese translation."""
+        check = self.shard["tasks"][0]["verifier"]["checks"][0]
+        check["description_translation_status"] = "missing"
+
+        with self.assertRaisesRegex(SmokeFailure, "verifier description is not exact"):
+            self.smoke._check_gamecraft_contract({"sample": self.shard})
+
+    def test_rejects_exact_status_without_chinese_verifier_text(self) -> None:
+        """An exact status cannot mask missing Chinese verifier content."""
+        check = self.shard["tasks"][0]["verifier"]["checks"][0]
+        check["description_zh"] = "English only"
+
+        with self.assertRaisesRegex(SmokeFailure, "description_zh has no meaningful Chinese"):
+            self.smoke._check_gamecraft_contract({"sample": self.shard})
+
+    def test_rejects_unreviewed_source_revision(self) -> None:
+        """A truthful reviewed flag cannot replace the exact source commit check."""
+        self.shard["repository_task_census"]["source_revision"] = "b" * 40
+
+        with self.assertRaisesRegex(SmokeFailure, "reviewed commit"):
+            self.smoke._check_gamecraft_contract({"sample": self.shard})
+
+    def test_rejects_family_census_drift(self) -> None:
+        """A 140-task shard still fails when the reviewed family distribution drifts."""
+        self.shard["repository_task_census"]["family_counts"] = {"Fixture": 2, "New": 1}
+
+        with self.assertRaisesRegex(SmokeFailure, "family census"):
+            self.smoke._check_gamecraft_contract({"sample": self.shard})
+
+    def test_rejects_mixed_language_pinned_title(self) -> None:
+        """A known mixed-language title regression fails even if its status claims exact."""
+        self.shard["tasks"][0]["title_zh"] = "Horror 13层"
+
+        with self.assertRaisesRegex(SmokeFailure, "exact Chinese title"):
+            self.smoke._check_gamecraft_contract({"sample": self.shard})
+
+
+class CheckedInPolicyTest(unittest.TestCase):
+    """Keep the v3 publication policy aligned with the public smoke contract."""
+
+    def test_gamecraft_is_full_and_deferred_benchmarks_remain_excluded(self) -> None:
+        """GameCraft is public while today's three development-only additions remain private."""
+        root = Path(__file__).resolve().parents[1]
+        policy = json.loads((root / "config/publication_policy.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(policy["policy_id"], "kw-bench-library-public-v3")
+        self.assertEqual(policy["expected_full_record_count"], 10161)
+        self.assertEqual(policy["full"]["gamecraft-bench"]["expected_records"], 140)
+        self.assertEqual(sum(item["expected_records"] for item in policy["full"].values()), 10161)
+        self.assertEqual(len(policy["full"]), 30)
+        self.assertTrue({
+            "m3-bench-omnidiagram",
+            "mcp-atlas",
+            "toolathlon",
+        }.issubset(policy["exclude"]))
 
 
 if __name__ == "__main__":

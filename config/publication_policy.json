@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "policy_id": "kw-bench-library-public-v2",
+  "policy_id": "kw-bench-library-public-v3",
   "description": "Public-internet publication policy. Only explicitly listed benchmark data may enter the export.",
-  "expected_full_record_count": 10021,
+  "expected_full_record_count": 10161,
   "pinned_source_sha256": {
-    "assets/mirror_index.json": "ec1ada7937c48a314a1adbf465c1b7decbf82313f89e12b0b569687bc5851d02",
-    "assets/preview_index.json": "a13fe30a77e84aba3087d70eed2762c029c3d811b354ac77458bd6659f6914a9",
-    "assets/verifier_source_index.json": "cbfa7942dddb327da35f7633bbad79ba45287ded8e0afedb194df2f73b663b13",
+    "assets/mirror_index.json": "306dfc78e5a8d3f03e2e12942e6398655e2f2e8866aba354399cf48e76753cc0",
+    "assets/preview_index.json": "9007fecbba5cabc14cc95ee45be92c6cb919c745aa2c37ffbd9b30ba4a59c083",
+    "assets/verifier_source_index.json": "f83e86dce290639575f0e8d87cc8cdc6ad8506447175f5583d37eb62e6e5bac0",
     "data/benches/aa-briefcase.json": "92315e8be9930e49629af5b2dfa3bc51d44586f6d2a898294dfb597f81b3d83d",
     "data/benches/agents-last-exam.json": "5d3b74b5183a622c2dec620b1f7201906ec941c50d1b79e234ae86710b6ff053",
     "data/benches/apex-accounting.json": "dc864240793f073c7ded47bc93cd2ae2fd9fc2d30353f3be87458f69eef2c595",
@@ -18,6 +18,7 @@
     "data/benches/draco.json": "68c9967fa7c5cbfe9cfc8949bf7dff67e1c491c98963006e57e610d379f319b2",
     "data/benches/enterpriseops-gym.json": "07bc8414db797297fb4fdb558db7d054222d084716032e95b95b49427e34d5cd",
     "data/benches/gaia2.json": "53800043cc3a6c8bca6738651aeede540f09bd174d9df551e161e8880d10631b",
+    "data/benches/gamecraft-bench.json": "8234bec19d4af5a2a03ee5e1d3d07a173e7167048442570d4e3b827fc2cd73f4",
     "data/benches/gdp-pdf.json": "8d755d863ef6accdbdce5d48d9ad71c2bd6598be84a317aa7fa01f8c6384cf44",
     "data/benches/gdpval.json": "511578d9ba0d066d42202953ef100b747be478906d2e677415bdc400d5f78eb4",
     "data/benches/handbook-md.json": "8d0f245993f3d7d4415ba683a7941bd431e047a47b1da98e75f7ff1e27e942ae",
@@ -25,7 +26,7 @@
     "data/benches/legal-agent-benchmark.json": "492547627217e71da9b281fa4d5a301487e7aa1f262b2146043250716a9ceda7",
     "data/benches/officebench.json": "919f5c1c48d5809b784c3c5ec1952f5e4bfbc5b4eacf41da9061584cecd49c8b",
     "data/benches/omegause-officeval.json": "eeca1daf6f7fe9f06a94066a930388910099129ff89e683fa6040ef9cf7163ab",
-    "data/benches/officeqa.json": "61e7f828bcf34f838970d831dd33e8627897ebf6501a3c54618dafd9b263cc75",
+    "data/benches/officeqa.json": "d52851174d0bb1e6a614bbadcb6fbb2dba24e12d63c04c3000f479d5f200d33f",
     "data/benches/parsebench.json": "0a32db112aeef3715274481c8e6ecc2397a4b956f8a15cfccbdb8bacfd9304f8",
     "data/benches/ppt-eval.json": "2f9879f8aec74b5f8817b2709bc31a3afacf39bdd575b1824684f704ce13222c",
     "data/benches/remote-labor-index.json": "132a56087ef04ee345c772af27843c80bbfebd3045a7076e3e76247eabaac08b",
@@ -36,7 +37,7 @@
     "data/benches/tau3-banking.json": "b9c1166f222ad2fd20d98191875ac98feaffa7caa6439f6080f4290d5e37030b",
     "data/benches/the-agent-company.json": "342e63387469631467b92c42cfa943ea3db40ba7df0b387b81e444a3118d0883",
     "data/benches/workbuddybench-office.json": "f62e5261fd960f22a92994771a7559404a156ca27f59af6b71a0f7cc22eefaac",
-    "data/catalog.json": "9053baebf8e077d977f5efc41c75f3754470d11487c22512fd7e31b1d00a19e2"
+    "data/catalog.json": "23181f507f5899fd7af25ab40779a26cb2e08007ce17f6067e39fb8fdf7571d0"
   },
   "full": {
     "aa-briefcase": {
@@ -90,6 +91,10 @@
     "gdpval": {
       "expected_records": 220,
       "reason_zh": "按最终公开发布确认，发布固定 revision 的 220 题 gold subset、参考文件与说明；保留第一方署名、许可与 NOTICE，并明确标注中文翻译和安全预览属于修改内容。"
+    },
+    "gamecraft-bench": {
+      "expected_records": 140,
+      "reason_zh": "发布固定 revision 的 140 个官方 Godot 游戏生成任务、仓库内输入与 Gold/Oracle 源码、完整 rubric 和只读 Verifier 源码；排除 example fixture，不执行上游脚本，也不镜像仓库外的第三方素材池与演示站产物。"
     },
     "handbook-md": {
       "expected_records": 65,
@@ -166,6 +171,15 @@
     }
   },
   "exclude": {
+    "m3-bench-omnidiagram": {
+      "reason_zh": "本轮仅纳入开发机版本，今日不进入公网发布。"
+    },
+    "mcp-atlas": {
+      "reason_zh": "本轮仅纳入开发机版本，今日不进入公网发布。"
+    },
+    "toolathlon": {
+      "reason_zh": "本轮仅纳入开发机版本，今日不进入公网发布。"
+    },
     "vals-vibe-code": {
       "reason_zh": "完整 benchmark 为 proprietary/gated，公开 artifact 仓库在固定 revision 下也没有再分发许可。"
     }

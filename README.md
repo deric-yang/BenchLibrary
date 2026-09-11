@@ -9,8 +9,7 @@ KW Bench Library 是面向知识工作与 Office / Web 产物评测的公开浏�
 ```text
 benchlibrary.com
   Cloudflare Worker
-  ├─ 轻量 UI（Workers Static Assets；必要时回退到同版本 R2）
-  └─ /data/* 与 /assets/*（同源流式读取 R2）
+  └─ /site/*、/data/* 与 /assets/*（同一不可变 release，同源流式读取 R2）
 
 开发机 immutable release
   └─ 公开策略白名单导出 + 脱敏 + SHA-256 manifest
@@ -23,7 +22,7 @@ benchlibrary.com
 
 公网导出是显式白名单，不是开发机目录的镜像：
 
-- 完整发布 29 个已确认可公开再分发的 Benchmark，共 10,021 个任务。
+- 完整发布 30 个已确认可公开再分发的 Benchmark，共 10,161 个任务。
 - 每个 Benchmark 的 `full`、`metadata_only`、`link_only` 或 `exclude` 决策都在固定策略中逐项记录；不依据 gated 状态或其他单一信号自动推断。
 - 未取得最终公开发布确认、禁止再分发以及 proprietary / closed Benchmark 仍保持链接、元数据或完全排除边界。
 - 永不打包接入后台、Contributor Key、Hugging Face Token、作业记录、私有 corpus、服务端配置或内部部署清单。
@@ -36,7 +35,7 @@ benchlibrary.com
 
 ## 本地开发
 
-需要 Node.js 20+ 与 Python 3.9+。
+需要 Node.js 22+ 与 Python 3.9+。
 
 ```bash
 npm ci
