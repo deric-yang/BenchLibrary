@@ -4,8 +4,8 @@
   "description": "Public-internet publication policy. Only explicitly listed benchmark data may enter the export.",
   "expected_full_record_count": 10161,
   "pinned_source_sha256": {
-    "assets/mirror_index.json": "306dfc78e5a8d3f03e2e12942e6398655e2f2e8866aba354399cf48e76753cc0",
-    "assets/preview_index.json": "9007fecbba5cabc14cc95ee45be92c6cb919c745aa2c37ffbd9b30ba4a59c083",
+    "assets/mirror_index.json": "a4436eebfc57e03e0b23f07a1c47d9e102e9204252ba73cee3057ab56e0a352d",
+    "assets/preview_index.json": "409379fb3d8486f3e80b165e493c556ee6bb95873aace28de202ad6286ed1ad6",
     "assets/verifier_source_index.json": "f83e86dce290639575f0e8d87cc8cdc6ad8506447175f5583d37eb62e6e5bac0",
     "data/benches/aa-briefcase.json": "92315e8be9930e49629af5b2dfa3bc51d44586f6d2a898294dfb597f81b3d83d",
     "data/benches/agents-last-exam.json": "5d3b74b5183a622c2dec620b1f7201906ec941c50d1b79e234ae86710b6ff053",

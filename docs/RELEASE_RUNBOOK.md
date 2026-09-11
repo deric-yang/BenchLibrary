@@ -93,6 +93,16 @@ KWBL_PREVIOUS_PUBLIC_RELEASE="/mnt/data/projects/bench-monitor/public-releases/<
 KWBL_PREVIOUS_R2_INVENTORY="/mnt/data/projects/bench-monitor/public-releases/.<previous-release>.r2-inventory.json"
 KWBL_COMPOSITE_SOURCE="/mnt/data/projects/bench-monitor/public-source-composites/<new-composite-id>"
 
+# 先只读规划；不会创建 output-root。将这里输出的两个 root index SHA-256
+# 写入/核对 policy pin 后，再用最终 policy 只执行一次正式构建。
+python3 scripts/build_public_composite_source.py \
+  --base-root "$KWBL_CANONICAL_SOURCE" \
+  --overlay-root "$KWBL_PREVIOUS_PUBLIC_RELEASE" \
+  --overlay-inventory "$KWBL_PREVIOUS_R2_INVENTORY" \
+  --policy config/publication_policy.json \
+  --output-root "$KWBL_COMPOSITE_SOURCE" \
+  --plan
+
 python3 scripts/build_public_composite_source.py \
   --base-root "$KWBL_CANONICAL_SOURCE" \
   --overlay-root "$KWBL_PREVIOUS_PUBLIC_RELEASE" \
@@ -105,19 +115,49 @@ python3 scripts/build_public_composite_source.py \
 该恢复流程只适用于“当前 immutable 缺洞、上一版公网已有且 inventory 已核验”的对象，不是通用
 数据合并器。builder 会完整绑定 base `release_manifest.json`、上一版 `data/public_manifest.json`
 及其同名 R2 inventory；只允许从上一版补入当前缺失的 `assets/mirrors/`、`assets/previews/`
-和 `assets/verifiers/` 文件。`data/**`、`site/**`、`assets/index_shards/**`、三个 root index
+和 `assets/verifiers/` 文件。`data/**`、`site/**`、旧 `assets/index_shards/**`、旧 root index
 以及其他 asset namespace 都不会从旧版继承。当前 base 已有的文件永不覆盖；同路径异字节时保留
 base，并将双方实际 size/SHA-256 与 `base_retained` 决策写入 provenance。
 
+如果补入的是 mirror 或 preview，builder 只从上一版两个**已经列入 public manifest、且由完整 R2
+inventory 复验、同时本地字节也与 manifest 匹配**的 root index 中恢复记录绑定。普通记录的
+`bench_id` 必须位于当前 policy `full`，`task_id` 必须存在于当前 immutable release 的对应
+`data/benches/<bench>.json`，且 `task_ids` 必须精确等于 `[task_id]`。唯一的非任务例外是 GDPval
+仓库级官方资产：ID 必须匹配 `gdpval:asset-<16位小写十六进制>`，role 只能是 `catalog` 或
+`reference`；这些记录在 provenance 中与任务记录分开计数并逐项列出 identity，不能伪装成任务绑定。
+
+恢复记录的每一个 deploy/view/preview/page/text 本地路径都必须属于本次已核验 supplement；每个
+新增 mirror/preview 文件也必须反向被恢复记录覆盖。只要记录混入非闭包路径、与 base 已有路径冲突、
+存在未知任务或未绑定补充文件，构建立即失败。内部 `object_path` 不进入恢复后的公网记录。
+builder 保留 base 的现有记录与 hashed shards，只把合格记录以稳定顺序加入复制出的 root index，
+随后确定性重算 summary；preview index 绑定新生成 mirror index 的 SHA-256。生成 index 的 size、
+SHA-256、记录集合哈希、supplement 路径集合哈希、任务/仓库级记录数和例外 ID 均进入 provenance。
+
 输出必须是全新、非 `current`、非 `live`、非 `releases` 的目录。完成标记和每个补入对象的
 path/size/SHA-256/transfer、两份 manifest 哈希、R2 inventory 哈希与摘要、策略哈希、跳过与冲突
-统计均写入 composite 根目录的 `.kwbl-composite-provenance.json`（`0644`）；该顶层文件不进入
+统计以及 root index 恢复审计均写入 composite 根目录的 `.kwbl-composite-provenance.json`
+（`0644`）；该顶层文件不进入
 公网引用闭包。composite 只是一次公网导出的开发机审计源，不替代 canonical immutable release，
 也不能反向覆盖开发机 `current`。
 
+正式规划和构建前，builder 会对 canonical base `release_manifest.json` 中的**每一个 payload**
+逐项重新核验 regular-file、size 和 SHA-256，并反向遍历 base 文件树。除固定位置且不自列入 payload
+的 `release_manifest.json` 外，任何未登记文件（包括意外 provenance、临时文件或工具输出）都会失败，
+从而保证后续 `copytree` 不可能把 manifest 外字节带进 composite。若确需以既有 composite 作为新 base，
+必须先生成新的 canonical immutable release 和完整 manifest，不能给顶层 provenance 开通隐式例外。
+
+记录先递归剥离唯一明确不公开的 `object_path`，再依次复用 `export_public_release.py` 的
+`sanitize_json`、递归发现与 normalize 语义，与正式导出的处理顺序完全一致。Office 临时锁文件会在
+路径发现前排除，敏感字段和内部路径会先脱敏；写入 composite 的恢复记录本身也是这一安全版本。
+路径发现支持嵌套 dict/list、chunks、`/bench-monitor/`、`bench-monitor/`、`./`、leading `/` 和 URL
+decode。strict reference key、任何 `*_url`，以及 base/overlay
+中实际存在的路径都必须落在本次 verified supplement 内；跨 Benchmark 路径一律失败。只有 exporter
+本来也会忽略的“non-strict key + 两侧磁盘均不存在”说明性/溯源字符串不计入闭包，其数量和稳定路径
+集合哈希会单独写入 provenance，避免把 `logical_path` 等说明字段误当成已发布文件。
+
 构建完成后，将本次命令的 `--source` 指向 `$KWBL_COMPOSITE_SOURCE`，重新运行原版 exporter 的
-`--validate-only` 与 `--validate-closure`。两项必须都通过；若当前 root index 指向缺失的 hashed
-index shard，或仍有任何未被严格允许的缺口，应继续 fail closed，不能从旧版偷补。最终公开候选
+`--validate-only` 与 `--validate-closure`。两项必须都通过；若当前 root index 指向缺失的 base
+hashed index shard，或仍有任何未被严格允许的缺口，应继续 fail closed，不能从旧版偷补。最终公开候选
 仍须由 exporter 新建到 `public-releases/<release-id>`，不得直接发布 composite。
 
 校验通过后，生成与源版本位于同一文件系统的公开候选版本。导出器使用 hard link 节省开发机空间：
