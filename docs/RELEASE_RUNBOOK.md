@@ -52,19 +52,45 @@ Worker PUBLIC_RELEASE_ID 原子切换 ──失败──▶ 切回上一 release
   TLS 保护的 HTTPS 请求和两端进程内存，不写日志或持久化。完整 inventory 核验成功后上传器强制销毁
   原文件；此前失败则保留同一文件供断点续传，不能中途生成另一把 key。
 
-当前仓库实现并强制执行的是开发机数据面的完整闭环。控制面在统一 helper 落地前使用已经授权且能自行
-刷新会话的 Cloudflare MCP；若会话不存在或失效，应在创建任何写入口前 fail closed，不能退回到询问或
-写入永久 API Token。这里不直接封装当前固定 Wrangler 的首次 Keychain 初始化路径，因为该路径会把本地
-加密材料放入子进程 argv，不满足本项目的“secret 不进入 argv”约束。
+控制面使用 `scripts/refresh_cloudflare_mcp_oauth.py` 完成免人工刷新。它通过 macOS Security.framework
+原生 API 精确读取并原位更新 Generic Password，不调用 `security` 或其他携带 secret 的子进程。默认
+service 是 `Codex MCP Credentials`，默认 account 是 `cloudflare|2e40c71145c8b601`；两者只是非敏感的
+Keychain locator，可以用同名 CLI 参数 `--service` / `--account` 覆盖。helper 刻意不枚举同一 service 下
+的其他条目，避免为“自动发现”读取无关 secret。若 locator 改变，应明确传入唯一 account，而不是扫描或猜测。
 
-未来统一控制面 helper 必须同时满足以下约束后才能替代 MCP：通过 macOS Security.framework 原生 API
-读写 Keychain（不调用携带 secret 参数的 `security` 子进程）；在内存中完成 OAuth refresh 与 rotation；
-并发刷新使用单实例锁；代理显式配置且失败时不直连；权限和目标同时收敛到指定 account、zone、Worker 与
-route；日志只包含操作类型、非敏感目标、过期时间、请求 ID 和状态。未来若迁移到 Linux，只能接入
-Secret Service、kernel keyring 或同等的用户态最小权限 provider，并通过受限 fd/Unix socket 取短时
-credential；不得把 refresh/access token 放入环境变量、普通文件或进程参数。
+helper 从 Keychain JSON 的 `issuer`、`client_id` 和 `token_response.refresh_token` 构造标准
+`refresh_token` grant；先通过 RFC 8414 发现同源 HTTPS `token_endpoint`，所有请求都显式经过
+`http://agent.baidu.com:8891`，禁止重定向并设置连接/读取超时。刷新成功后保留 JSON 中未知字段，原位更新
+`access_token`、`expires_in`、`expires_at`，并仅在响应提供新 `refresh_token` 时执行 rotation；13 位 Unix
+毫秒等原有 expiration 编码保持不变。stdout/stderr 只有非敏感状态码、刷新动作与规范化到期时间；即使
+expiration 对象带有未知字段，也不会把这些字段带出 Keychain。
+
+刷新前 helper 会取得当前用户专属的跨进程 advisory lock。默认空锁文件位于
+`~/Library/Caches/KWBenchLibrary/credential-locks/cloudflare-mcp-oauth.lock`；父目录必须是当前 uid 拥有的
+精确 `0700` 非 Git 目录，文件必须是当前 uid 拥有、精确 `0600`、空内容、普通单硬链接且不能是 symlink。
+锁覆盖 Keychain read → OAuth discovery/refresh → 同一 Keychain item 原位更新的完整周期。可用非敏感
+`--lock-file` 覆盖，但其父目录必须预先满足相同条件；锁文件以非阻塞模式打开，锁歧义或已被其他进程持有时
+fail closed。运行期间及日常清理中不得删除或替换这个持久锁 inode。
+
+首次 OAuth 浏览器授权仍由用户亲自完成；此后标准刷新不再询问或接收 Token。若 Keychain 条目不存在、结构
+不兼容、权限不足或网络失败，应在创建任何写入口前 fail closed，不能退回永久 API Token。当前固定 Wrangler
+的首次 Keychain 初始化路径会把本地加密材料放入子进程 argv，因此仍不得用于这条自动刷新链路。未来若迁移
+到 Linux，只能接入 Secret Service、kernel keyring 或同等用户态最小权限 provider，并通过受限 fd/Unix
+socket 获取短时 credential；不得把 refresh/access token 放入环境变量、普通文件或进程参数。
 
 ## 标准发布流程
+
+在启动或重载执行 Cloudflare MCP 操作的控制面 Agent 前，先做只读状态检查，再执行按需提前刷新。默认提前
+窗口为 900 秒；token 足够新鲜时第二条命令不会发起任何网络请求或写 Keychain：
+
+```bash
+python3 scripts/refresh_cloudflare_mcp_oauth.py --dry-status
+python3 scripts/refresh_cloudflare_mcp_oauth.py \
+  --refresh-window-seconds 900
+```
+
+两条命令都不接受 credential 参数，也不读取 credential 环境变量。第一条不访问网络、不更新 Keychain；
+第二条只在窗口内刷新。完成后再启动或重载 Cloudflare MCP，使控制面进程读取已刷新的 Keychain 条目。
 
 以下命令应在开发机的干净 GitHub 工作区执行。变量名仅作示例，应为每次发布设置具体值：
 
@@ -294,11 +320,16 @@ python3 scripts/verify_r2_release.py \
 
 先记录线上旧的 `PUBLIC_RELEASE_ID`、当前 deployment id 和其 100% 流量对应的 Worker
 version id。后者是包含旧代码、静态资源、bindings 与旧 release 指针的精确回滚锚点；不要只记
-release id。再把 Worker 指向已通过 inventory 核验的新版本：
+release id。再通过已认证控制面的 Cloudflare Version Upload API 创建新 version，上传经过本地 SHA-256
+核验的 `src/index.js` module，并显式提交且只提交以下两个 bindings：
 
-```bash
-KWBL_PUBLIC_RELEASE_ID="$KWBL_PUBLIC_RELEASE_ID" npm run deploy
-```
+- `PUBLIC_CORPUS`：R2 bucket `benchlibrary-public`；
+- `PUBLIC_RELEASE_ID`：已通过 inventory 核验的新 release id。
+
+创建后必须回读 version settings，确认 compatibility date/flags、module SHA-256 和上述 exact-2-binding 均
+符合预期，再通过 Deployment API 把该 version 切到 100%。生产环境禁止执行 `npm run deploy` 或
+`wrangler deploy`；仓库现有 Wrangler 入口仅供非生产环境使用，其 `STATIC_ASSETS` 与 custom domain 配置
+不属于当前公网生产架构。
 
 切换后以未登录、无 Cookie 的客户端检查：
 

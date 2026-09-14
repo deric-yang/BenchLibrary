@@ -63,11 +63,24 @@ python3 scripts/export_public_release.py \
 
 ## 部署
 
-日常部署使用项目固定的 Wrangler 版本：
+Mac 控制面在首次 OAuth 授权后，通过原生 Keychain helper 自动维持 Cloudflare MCP 会话；命令行不接收
+refresh/access token，也不会把它们写入环境变量、普通文件或日志：
 
 ```bash
-KWBL_PUBLIC_RELEASE_ID=<validated-release-id> npm run deploy
+python3 scripts/refresh_cloudflare_mcp_oauth.py --dry-status
+python3 scripts/refresh_cloudflare_mcp_oauth.py --refresh-window-seconds 900
 ```
+
+helper 默认精确读取 Generic Password 的非敏感 locator
+`Codex MCP Credentials` / `cloudflare|2e40c71145c8b601`，不会枚举其他 Keychain secret。它使用显式代理、
+HTTPS、禁止重定向和跨进程私有锁；足够新鲜时不发网络请求，刷新时保留未知 JSON 字段及原有 Unix 毫秒
+expiration 格式。若本机 locator 不同，可通过非敏感 `--service` / `--account` 覆盖。详细边界和安全的
+`--lock-file` 覆盖方式见 [`docs/RELEASE_RUNBOOK.md`](docs/RELEASE_RUNBOOK.md)。
+
+公网生产切换只能通过已认证控制面的 Cloudflare Version Upload API 完成：新 version 必须只包含
+`PUBLIC_CORPUS` R2 binding 与 `PUBLIC_RELEASE_ID` plain-text binding，并在切流前回读核对。禁止使用
+`npm run deploy` 或 `wrangler deploy` 发布生产；仓库保留的 Wrangler 入口只用于非生产环境，不适用于当前
+公网架构，因为它会按 `wrangler.jsonc` 携带 `STATIC_ASSETS` 和 custom domain 配置。
 
 大体积数据必须先完成本地逐文件哈希复验、R2 上传与远端 inventory 校验，再切换 `PUBLIC_RELEASE_ID`。上传器会核对 manifest 中每个 `r2_key` 和临时端点的 immutable release 前缀，断点命中也不会跳过本地内容复验；断点状态保存在 release 目录之外。`ops/uploader-worker.mjs` 是仅用于首次/批量传输的临时、前缀受限上传器；它使用 `scripts/create_one_time_upload_key.py` 在独立于 Git 的凭据目录自动创建一次性随机密钥，完整 inventory 核验成功后客户端会强制删除密钥文件。随后还应删除临时 Worker，不能把任何生产写入口保留下来。
 
