@@ -143,6 +143,7 @@ class OneTimeUploadKeyTests(unittest.TestCase):
             real_open = os.open
 
             def recording_open(*args: object, **kwargs: object) -> int:
+                """Record each descriptor opened while exercising the rejection path."""
                 descriptor = real_open(*args, **kwargs)
                 opened.append(descriptor)
                 return descriptor
@@ -270,6 +271,7 @@ class OneTimeUploadKeyTests(unittest.TestCase):
                 real_open = os.open
 
                 def require_nonblocking(*args: object, **kwargs: object) -> int:
+                    """Assert that FIFO inspection uses no-follow, non-blocking flags."""
                     if args[0] == fifo.name:
                         flags = int(args[1])
                         self.assertTrue(flags & os.O_NONBLOCK)
@@ -309,6 +311,7 @@ class OneTimeUploadKeyTests(unittest.TestCase):
             real_open = os.open
 
             def recording_open(*args: object, **kwargs: object) -> int:
+                """Record descriptors so the test can prove they were closed."""
                 descriptor = real_open(*args, **kwargs)
                 opened.append(descriptor)
                 return descriptor
@@ -334,6 +337,7 @@ class OneTimeUploadKeyTests(unittest.TestCase):
             real_open = os.open
 
             def recording_open(*args: object, **kwargs: object) -> int:
+                """Record the parent descriptor opened before path validation fails."""
                 descriptor = real_open(*args, **kwargs)
                 opened.append(descriptor)
                 return descriptor
@@ -357,6 +361,7 @@ class OneTimeUploadKeyTests(unittest.TestCase):
             real_read = key_module._read_limited
 
             def replace_after_read(descriptor: int) -> bytes:
+                """Swap the path after reading to simulate a pathname race."""
                 payload = real_read(descriptor)
                 path.unlink()
                 self._write_token(path, b"b" * 64)
@@ -524,6 +529,7 @@ class OneTimeUploadKeyTests(unittest.TestCase):
                     token_file = read_one_time_upload_key(path)
 
                     def unlink_then_interrupt(*args: object, **kwargs: object) -> None:
+                        """Raise a control-flow interruption immediately after unlinking."""
                         real_unlink(*args, **kwargs)
                         raise failure
 
@@ -565,6 +571,7 @@ class OneTimeUploadKeyTests(unittest.TestCase):
             calls = 0
 
             def fail_first_file_stat(descriptor: int) -> os.stat_result:
+                """Fail the first post-create file stat while allowing reconciliation."""
                 nonlocal calls
                 calls += 1
                 if calls == 2:
@@ -588,6 +595,7 @@ class OneTimeUploadKeyTests(unittest.TestCase):
             real_open = os.open
 
             def recording_open(*args: object, **kwargs: object) -> int:
+                """Record the anchored parent descriptor for close verification."""
                 descriptor = real_open(*args, **kwargs)
                 opened.append(descriptor)
                 return descriptor
