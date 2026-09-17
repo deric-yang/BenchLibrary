@@ -18,6 +18,8 @@ KW Bench Library 是面向知识工作与 Office / Web 产物评测的公开浏�
 [`docs/BENCHLIST.md`](docs/BENCHLIST.md)。GitHub 的 `site/` 可单独预览 BenchList；
 大型题库原件仍只在 R2，不提交到 Git。
 
+最近发布：[2026-09-18 BenchList 发布记录](docs/releases/20260918-benchlist-v4.md)。
+
 ## 发布架构
 
 ```text
