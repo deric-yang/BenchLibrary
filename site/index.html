@@ -9,6 +9,7 @@
     <meta name="description" content="KW Bench Library：知识工作与 Office Artifact Benchmark 的独立目录、题库与公开镜像预览站。">
     <title>KW Bench Library</title>
     <link rel="stylesheet" href="styles.css?v=20260903c">
+    <link rel="stylesheet" href="benchlist.css?v=20260914d">
 </head>
 <body>
     <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -24,6 +25,10 @@
                 <small>Knowledge Work · Artifact Benchmarks</small>
             </span>
         </a>
+        <nav class="benchlist-nav" aria-label="功能模块">
+            <a href="#" id="benchlistCatalogLink">评测题库</a>
+            <a href="#view=benchlist" id="openBenchList">BenchList <span>引用审计</span></a>
+        </nav>
         <div class="nav-context" aria-label="数据状态">
             <span class="nav-context-label">CATALOG</span>
             <strong id="navBenchCount">—</strong>
@@ -214,6 +219,10 @@
                 </section>
             </section>
 
+            <section class="benchlist-workspace hidden" id="benchlistWorkspace" aria-labelledby="benchlistTitle">
+                <div class="bl-loading" role="status">正在读取 BenchList 引用审计…</div>
+            </section>
+
             <section class="bench-workspace hidden" id="benchWorkspace" aria-live="polite">
                 <header class="bench-hero" id="benchHero"></header>
 
@@ -319,6 +328,8 @@
             <span class="bench-button-meta"></span>
         </button>
     </template>
+
+    <script src="benchlist.js?v=20260914f" defer></script>
     <script src="public-config.js" defer></script>
     <script src="app.js" defer></script>
 </body>

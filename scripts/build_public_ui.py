@@ -218,9 +218,9 @@ def build_index(source: str) -> str:
         "",
         label="ingestion script",
     )
-    html = replace_once(
+    html = regex_replace_once(
         html,
-        '    <script src="app.js?v=20260903a" defer></script>',
+        r'    <script src="app\.js(?:\?[^\"]*)?" defer></script>',
         (
             '    <script src="public-config.js" defer></script>\n'
             '    <script src="app.js" defer></script>'
@@ -294,12 +294,18 @@ def build_app(source: str) -> str:
         setNavStatus("loading", "读取目录");
     }
 """,
-        """    showLoader({
-        kicker: "CATALOG · STAGE 1 / 2",
-        title: "正在打开评测目录",
-        message: "先读取轻量索引；题库只在你选择 Bench 后加载。",
-    });
-    setNavStatus("loading", "读取目录");
+        """    if (isBenchListLocation()) {
+        dom.loadingLayer.classList.add("hidden");
+        setNavStatus("loading", "目录后台加载");
+    }
+    else {
+        showLoader({
+            kicker: "CATALOG · STAGE 1 / 2",
+            title: "正在打开评测目录",
+            message: "先读取轻量索引；题库只在你选择 Bench 后加载。",
+        });
+        setNavStatus("loading", "读取目录");
+    }
 """,
         label="private catalog-loading branch",
     )
@@ -387,7 +393,7 @@ def build_app(source: str) -> str:
         return;
     }
 """,
-        "",
+        '    const view = params.get("view") || "";\n',
         label="private hash route",
     )
     app = regex_replace_once(
@@ -431,6 +437,29 @@ def build_app(source: str) -> str:
     for internal_text, public_text in public_copy.items():
         app = app.replace(internal_text, public_text)
     return app
+
+
+
+def build_benchlist(source: str) -> str:
+    """Adapt shared BenchList rendering to the public evidence-only schema."""
+    result = source.replace('new URL("data/benchlist.json", document.baseURI)',
+                            'new URL("benchlist.json", document.baseURI)')
+    result = result.replace('controls.append(priority, projection);', 'controls.append(projection);')
+    result = result.replace('[["verified", "已核实 · 发布方采用"], ["original", "原文提及 · 窗口内模型"]]',
+                            '[["verified", "已核实 · 发布方采用"]]')
+    result = result.replace('"原文与修正建议"', '"Benchmark 说明与公开来源"')
+    result = re.sub(r'^        detailField\(evaluation, "原文(?:模型|价值描述)".*?;\n', '', result, flags=re.M)
+    result = result.replace('`${row.priority} · ${CATEGORY_LABEL[row.category] || row.category}',
+                            '`${CATEGORY_LABEL[row.category] || row.category}')
+    result = result.replace('el("span", `bl-priority bl-priority-${row.priority.toLowerCase()}`, row.priority),', '')
+    result = result.replace('${row.name} [${row.priority}]', '${row.name}')
+    result = result.replace('选择只保存在当前浏览器，不改变原文优先级。', '选择只保存在当前浏览器。')
+    result = result.replace('优先级沿用原文，候选清单由你选择。', '候选清单由你选择。')
+    result = result.replace('原文未列', '本周补充').replace('项原文', '项基线').replace('非原文', '本周补充')
+    result = result.replace('[openClaims, "窗口内原文待澄清", "包括错配、对照项与尚未证实"]',
+                            '[registry().length, "已登记型号", "含窗口外与日期待核实型号"]')
+    result = result.replace('◦ 窗口内原文待澄清', '仅显示已核实发布引用')
+    return result
 
 
 def assert_public_output(index: str, app: str, styles: str, config: str) -> None:
@@ -482,7 +511,7 @@ def main() -> None:
     args = parse_args()
     source_dir = args.source.resolve()
     output_dir = args.output.resolve()
-    required = ("index.html", "app.js", "styles.css")
+    required = ("index.html", "app.js", "styles.css", "benchlist.js", "benchlist.css")
     missing = [name for name in required if not (source_dir / name).is_file()]
     if missing:
         raise FileNotFoundError(f"missing UI source files: {', '.join(missing)}")
@@ -501,6 +530,11 @@ def main() -> None:
     (output_dir / "index.html").write_text(index, encoding="utf-8")
     (output_dir / "app.js").write_text(app, encoding="utf-8")
     (output_dir / "styles.css").write_text(styles, encoding="utf-8")
+    benchlist = build_benchlist((source_dir / "benchlist.js").read_text(encoding="utf-8"))
+    (output_dir / "benchlist.js").write_text(benchlist, encoding="utf-8")
+    (output_dir / "benchlist.css").write_text(
+        (source_dir / "benchlist.css").read_text(encoding="utf-8"), encoding="utf-8",
+    )
     print(f"Built public UI in {output_dir}")
 
 

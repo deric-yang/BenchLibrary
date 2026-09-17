@@ -263,6 +263,11 @@ function bindEvents() {
     });
 
     document.addEventListener("keydown", (event) => {
+        if (event.key === "/" && !isTypingTarget(event.target) && isBenchListLocation()) {
+            event.preventDefault();
+            globalThis.KwBenchList?.focusSearch();
+            return;
+        }
         if (event.key === "/" && !isTypingTarget(event.target)) {
             event.preventDefault();
             if (window.innerWidth <= 960) {
@@ -293,12 +298,18 @@ async function loadCatalog() {
     abortActiveFetch();
     state.retryAction = loadCatalog;
     hideFatalState();
-    showLoader({
-        kicker: "CATALOG · STAGE 1 / 2",
-        title: "正在打开评测目录",
-        message: "先读取轻量索引；题库只在你选择 Bench 后加载。",
-    });
-    setNavStatus("loading", "读取目录");
+    if (isBenchListLocation()) {
+        dom.loadingLayer.classList.add("hidden");
+        setNavStatus("loading", "目录后台加载");
+    }
+    else {
+        showLoader({
+            kicker: "CATALOG · STAGE 1 / 2",
+            title: "正在打开评测目录",
+            message: "先读取轻量索引；题库只在你选择 Bench 后加载。",
+        });
+        setNavStatus("loading", "读取目录");
+    }
 
     let lastError = null;
     for (const candidate of CATALOG_CANDIDATES) {
@@ -330,6 +341,11 @@ async function loadCatalog() {
     }
 
     const message = lastError?.message || "没有找到可读取的 catalog.json。";
+    if (isBenchListLocation()) {
+        dom.loadingLayer.classList.add("hidden");
+        setNavStatus("ready", "BenchList · 题库目录暂不可用");
+        return;
+    }
     setNavStatus("error", "目录读取失败");
     showLoaderError("目录没有加载成功", message, loadCatalog);
     showFatalState(message);
@@ -1165,6 +1181,7 @@ async function selectBench(benchId, options = {}) {
     if (!entry) {
         return;
     }
+    globalThis.KwBenchList?.deactivate();
     setSidebarOpen(false);
     state.activeBenchId = benchId;
     markActiveBenchButton();
@@ -4543,6 +4560,10 @@ function concatUint8Arrays(chunks, total) {
 }
 
 function showLoader(options) {
+    if (isBenchListLocation() && !state.activeBenchId) {
+        dom.loadingLayer.classList.add("hidden");
+        return;
+    }
     dom.loadingLayer.classList.remove("hidden");
     dom.loadingRetry.classList.add("hidden");
     dom.loadingKicker.textContent = options.kicker || "LOADING";
@@ -4618,7 +4639,9 @@ function showFatalState(message) {
 function hideFatalState() {
     dom.fatalState.classList.add("hidden");
     if (!state.activeBenchId) {
-        dom.catalogHome.classList.remove("hidden");
+        if (!isBenchListLocation()) {
+            dom.catalogHome.classList.remove("hidden");
+        }
     }
 }
 
@@ -4633,6 +4656,7 @@ function renderEmptyInspector(title, copy) {
 }
 
 function showCatalogHome(options = {}) {
+    globalThis.KwBenchList?.deactivate();
     state.activeBenchId = "";
     state.activeTaskId = "";
     state.activeBench = null;
@@ -4650,6 +4674,11 @@ function showCatalogHome(options = {}) {
 
 function handleHashChange() {
     const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const view = params.get("view") || "";
+    if (view === "benchlist") {
+        showBenchListWorkspace();
+        return;
+    }
     if (!state.benches.length) {
         return;
     }
@@ -4695,6 +4724,26 @@ function updateLocation(benchId, taskId, variant) {
     if (location.hash !== hash) {
         history.replaceState(null, "", `${location.pathname}${location.search}${hash}`);
     }
+}
+
+function isBenchListLocation() {
+    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    return params.get("view") === "benchlist";
+}
+
+function showBenchListWorkspace() {
+    if (document.body.classList.contains("benchlist-active")) {
+        setNavStatus("ready", "BenchList · 引用审计");
+        return;
+    }
+    showCatalogHome({scroll: false, updateLocation: false});
+    abortActiveFetch();
+    dom.catalogHome.classList.add("hidden");
+    dom.fatalState.classList.add("hidden");
+    dom.loadingLayer.classList.add("hidden");
+    setSidebarOpen(false);
+    setNavStatus("ready", "BenchList · 引用审计");
+    void globalThis.KwBenchList?.activate();
 }
 
 function markActiveBenchButton() {
