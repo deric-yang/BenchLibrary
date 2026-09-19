@@ -3843,7 +3843,12 @@ function resolvePreviewSpec(material, task, slot) {
         kind = "text";
     }
     else if (localUrl) {
-        if (declaredKind.includes("html") || ["html", "htm"].includes(localExtension)) {
+        // A requested conversion format is not evidence that conversion exists.
+        // Original Office bytes must remain downloads until a real preview is bound.
+        if (["xlsx", "xls", "xlsm", "docx", "doc", "pptx", "ppt"].includes(localExtension)) {
+            kind = "missing";
+        }
+        else if (declaredKind.includes("html") || ["html", "htm"].includes(localExtension)) {
             kind = sanitizedHtml ? "html" : "missing";
         }
         else if (declaredKind.includes("pdf") || localExtension === "pdf") {

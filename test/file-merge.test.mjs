@@ -20,6 +20,7 @@ function workbookFixture(api) {
     const files = [1, 2, 3].map((n) => ({
         filename: `${n}_input.xlsx`, archive_path: `data/task-1/${n}_input.xlsx`,
         source_url: archive, url: `assets/mirrors/${n}_input.xlsx`,
+        preview: {status: "conversion_required", preview_kind: "pdf", preview_url: ""},
     }));
     const mirrors = files.map((file, i) => ({
         bench_id: "bench-a", task_id: "task-1", role: "input", status: "ready",
