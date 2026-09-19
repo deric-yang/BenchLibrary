@@ -3517,19 +3517,39 @@ function mergeIndexedMaterials(declaredMaterials, task, slot) {
             || !indexedRecordCanSynthesizeMaterial(record, task, slot)) {
             return;
         }
-        indexedByKey.set(indexedRecordKey(record), record);
+        const key = originalRecordKey(record, slot);
+        if (!indexedByKey.has(key)) {
+            indexedByKey.set(key, record);
+        }
     });
 
     const matchedKeys = new Set();
     declaredMaterials.forEach((material) => {
         const match = getMaterialIndexMatch(material, task, slot);
-        const record = match?._previewRecord || match?._mirrorRecord;
-        if (record) {
-            matchedKeys.add(indexedRecordKey(record));
-        }
+        [match?._mirrorRecord, match?._previewRecord].filter(Boolean).forEach((record) => {
+            matchedKeys.add(originalRecordKey(record, slot));
+        });
     });
 
-    const merged = [...declaredMaterials];
+    const declaredKeys = new Set();
+    const merged = declaredMaterials.filter((material) => {
+        const match = getMaterialIndexMatch(material, task, slot);
+        const record = match?._mirrorRecord || match?._previewRecord;
+        if (!record && material.isFallbackName && indexedByKey.size) {
+            // A slot-level status is not an additional file alongside named assets.
+            return false;
+        }
+        const path = originalSourcePath(material.raw);
+        const key = record ? originalRecordKey(record, slot) : (path ? `${slot}::${path}` : "");
+        if (!key) {
+            return true;
+        }
+        if (declaredKeys.has(key)) {
+            return false;
+        }
+        declaredKeys.add(key);
+        return true;
+    });
     indexedByKey.forEach((record, key) => {
         if (matchedKeys.has(key)) {
             return;
@@ -3575,7 +3595,7 @@ function indexedRecordCanSynthesizeMaterial(record, task, slot) {
 
 function indexedRecordKey(record) {
     return [
-        firstString(record?.role, record?.slot, record?.type),
+        normalizeIdentity(firstString(record?.role, record?.slot, record?.type)),
         firstString(
             record?.logical_path,
             record?.repository_path,
@@ -3584,7 +3604,74 @@ function indexedRecordKey(record) {
             record?.preview_url,
             record?.sha256,
         ),
-    ].map(normalizeIdentity).join("::");
+    ].join("::");
+}
+
+// Source identities are case-sensitive. Deployment and preview URLs are not
+// interchangeable with a repository path or an archive member.
+function originalSourcePath(value) {
+    return firstString(value?.repository_path, value?.archive_path, value?.archive_member,
+        value?.logical_path, value?.path).replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function originalPathsAgree(left, right) {
+    if (left === right) {
+        return true;
+    }
+    // Some declarations encode "archive.tar.gz::member/path" while the
+    // extraction index stores only the member. Two explicit containers must
+    // still agree; a shared basename alone is never an alias.
+    if (left.includes("::") && !right.includes("::")) {
+        return left.split("::").pop() === right;
+    }
+    if (right.includes("::") && !left.includes("::")) {
+        return right.split("::").pop() === left;
+    }
+    return false;
+}
+
+function originalRecordKey(record, slot) {
+    return `${slot}::${originalSourcePath(record)
+        || firstString(record?.source_view_path, record?.view_path)
+        || indexedRecordKey(record)}`;
+}
+
+function originalHash(value) {
+    return firstString(value?.source_sha256, value?.sha256, value?.expected_sha256);
+}
+
+function sameOriginalRecord(left, right) {
+    const leftHash = originalHash(left);
+    const rightHash = originalHash(right);
+    if (leftHash && rightHash && leftHash !== rightHash) {
+        return false;
+    }
+    const leftPath = originalSourcePath(left);
+    const rightPath = originalSourcePath(right);
+    if (leftPath && rightPath) {
+        return originalPathsAgree(leftPath, rightPath);
+    }
+    return Boolean((left?.source_view_path && left.source_view_path === right?.view_path)
+        || (right?.source_view_path && right.source_view_path === left?.view_path)
+        || (leftHash && leftHash === rightHash));
+}
+
+function materialHasOriginalPath(material, record) {
+    const path = originalSourcePath(material?.raw);
+    const recordPath = originalSourcePath(record);
+    return Boolean(path && recordPath && originalPathsAgree(path, recordPath));
+}
+
+function isDirectMaterialUrl(url, material, record) {
+    try {
+        const filename = decodeURIComponent(new URL(url).pathname.split("/").pop());
+        const recordFilename = firstString(record?.filename, originalSourcePath(record).split("/").pop());
+        return Boolean(filename && (filename === recordFilename
+            || (!material.isFallbackName && filename === material.name.split("/").pop())));
+    }
+    catch (_error) {
+        return false;
+    }
 }
 
 function normalizeMaterial(item, fallbackName) {
@@ -3812,8 +3899,14 @@ function resolvePreviewSpec(material, task, slot) {
 }
 
 function getMaterialIndexMatch(material, task, slot) {
-    if (!Object.prototype.hasOwnProperty.call(material, "_indexMatch")) {
+    const context = [state.activeBenchId, task.id, slot,
+        state.mirrorRecordsByBench.get(state.activeBenchId),
+        state.previewRecordsByBench.get(state.activeBenchId),
+        state.benchMirrorManifest, state.globalMirrorManifest];
+    if (!material._indexMatchContext
+        || context.some((value, index) => value !== material._indexMatchContext[index])) {
         material._indexMatch = findMirrorEntry(task, material, slot);
+        material._indexMatchContext = context;
     }
     return material._indexMatch;
 }
@@ -3854,8 +3947,12 @@ function formatIndexedProvenance(record, material, slot) {
 function findMirrorEntry(task, material, slot) {
     const previewRecords = state.previewRecordsByBench.get(state.activeBenchId) || [];
     const mirrorRecords = state.mirrorRecordsByBench.get(state.activeBenchId) || [];
-    const previewRecord = findBestIndexedRecord(previewRecords, task, material, slot);
     let mirrorRecord = findBestIndexedRecord(mirrorRecords, task, material, slot);
+    const previewRecord = findBestIndexedRecord(
+        mirrorRecord ? previewRecords.filter((record) => sameOriginalRecord(record, mirrorRecord))
+            : previewRecords,
+        task, material, slot,
+    );
     if (previewRecord && !mirrorRecord) {
         mirrorRecord = findCompanionMirrorRecord(mirrorRecords, previewRecord, task, material, slot);
     }
@@ -3879,18 +3976,32 @@ function findMirrorEntry(task, material, slot) {
 function findBestIndexedRecord(records, task, material, slot) {
     let best = null;
     let bestScore = -1;
+    let ambiguous = false;
     records.forEach((record) => {
         const score = scoreIndexedRecord(record, task, material, slot);
         if (score > bestScore) {
             best = record;
             bestScore = score;
+            ambiguous = false;
+        }
+        else if (score === bestScore && best
+            && originalRecordKey(record, slot) !== originalRecordKey(best, slot)) {
+            ambiguous = true;
         }
     });
-    return bestScore >= 40 ? best : null;
+    return bestScore >= 40 && !ambiguous ? best : null;
 }
 
 function scoreIndexedRecord(record, task, material, slot) {
     if (!mirrorRecordMatchesContext(record, task, slot, material)) {
+        return -1;
+    }
+    const sourcePath = originalSourcePath(material.raw);
+    const recordPath = originalSourcePath(record);
+    const materialHash = originalHash(material.raw);
+    const recordHash = originalHash(record);
+    if ((sourcePath && recordPath && !originalPathsAgree(sourcePath, recordPath))
+        || (materialHash && recordHash && materialHash !== recordHash)) {
         return -1;
     }
     let score = 0;
@@ -3937,7 +4048,7 @@ function scoreIndexedRecord(record, task, material, slot) {
 
     const materialUrls = extractMaterialUrls(material);
     const recordUrls = extractRecordUrls(record);
-    if (materialUrls.some((url) => recordUrls.includes(url))) {
+    if (materialUrls.some((url) => recordUrls.includes(url) && isDirectMaterialUrl(url, material, record))) {
         score += 110;
         materialIdentityMatched = true;
         strongMaterialIdentityMatched = true;
@@ -3994,7 +4105,9 @@ function findCompanionMirrorRecord(records, previewRecord, task, material, slot)
             return mirrorRecordMatchesContext(record, task, slot, material)
                 && Boolean(sourceHash && recordHash === sourceHash && logicalPath && recordPath === logicalPath);
         }
-        return (sourceHash && recordHash === sourceHash) || (logicalPath && recordPath === logicalPath);
+        return mirrorRecordMatchesContext(record, task, slot, material)
+            && sameOriginalRecord(previewRecord, record)
+            && scoreIndexedRecord(record, task, material, slot) >= 40;
     }) || null;
 }
 
@@ -4077,6 +4190,11 @@ function mirrorRecordMatchesContext(entry, task, slot, material = null) {
     if (!role) {
         return true;
     }
+    if (slot === "input" && ["reference", "source"].includes(role)
+        && recordIsDeclaredOutput(entry, task)) {
+        // An explicit dual-use declaration takes precedence over inference.
+        return normalizeInputMaterials(task).some((item) => materialHasOriginalPath(item, entry));
+    }
     const inputRoles = new Set(["input", "source", "reference", "context", "catalog"]);
     const outputRoles = new Set(["output", "artifact", "gold", "candidate", "deliverable"]);
     if (slot === "output" && ["reference", "source"].includes(role)) {
@@ -4084,6 +4202,10 @@ function mirrorRecordMatchesContext(entry, task, slot, material = null) {
             || strictReferenceRecordMatchesContext(entry, task, material);
     }
     return slot === "input" ? inputRoles.has(role) : outputRoles.has(role);
+}
+
+function recordIsDeclaredOutput(record, task) {
+    return normalizeOutputMaterials(task).some((material) => materialHasOriginalPath(material, record));
 }
 
 function strictReferenceRecordMatchesContext(entry, task, material) {
@@ -4218,7 +4340,7 @@ function extractMaterialUrls(material) {
         raw.url,
         raw.source_url,
         raw.original_url,
-    ]).map(normalizeUrlValue).filter(Boolean);
+    ]).map(normalizeOriginalUrl).filter(Boolean);
 }
 
 function extractRecordUrls(record) {
@@ -4226,7 +4348,22 @@ function extractRecordUrls(record) {
         record?.url,
         record?.source_url,
         record?.original_url,
-    ]).map(normalizeUrlValue).filter(Boolean);
+    ]).map(normalizeOriginalUrl).filter(Boolean);
+}
+
+function normalizeOriginalUrl(value) {
+    const url = safeHttpUrl(value);
+    if (!url) {
+        return "";
+    }
+    try {
+        const parsed = new URL(url);
+        parsed.hash = "";
+        return decodeURIComponent(parsed.href);
+    }
+    catch (_error) {
+        return url.split("#")[0];
+    }
 }
 
 function extractTaskSourceUrls(task, slot) {
