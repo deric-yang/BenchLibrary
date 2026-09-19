@@ -28,7 +28,7 @@ function workbookFixture(api) {
     }));
     const preview = {...mirrors[0], source_sha256: "hash-1", preview_kind: "pdf",
         preview_url: "assets/previews/first.pdf", source_view_path: mirrors[0].view_path};
-    const task = {id: "task-1", raw: {source: {files}}};
+    const task = {id: "task-1", raw: {source: {files}, preview: {preview_kind: "pdf"}}};
     resetIndexes(api, "bench-a", mirrors, [preview]);
     return {files, mirrors, preview, task};
 }
@@ -43,6 +43,7 @@ test("shared archive: three originals remain three cards and only the first has 
     assert.equal(specs[0].kind, "pdf");
     for (const i of [1, 2]) {
         assert.equal(specs[i].previewBound, false);
+        assert.equal(specs[i].kind, "missing");
         assert.equal(specs[i].mirrorUrl, `http://example.test/bench-monitor/assets/mirrors/${i + 1}_input.xlsx`);
     }
     assert.equal(api.mergeIndexedMaterials(merged, task, "input").length, 3);

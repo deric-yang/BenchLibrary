@@ -3794,7 +3794,7 @@ function resolvePreviewSpec(material, task, slot) {
         legacyRecord?.kind,
         raw?.preview_kind,
         raw?.preview?.preview_kind,
-        task.raw?.preview?.preview_kind,
+        slot === "output" ? task.raw?.preview?.preview_kind : "",
     ).toLocaleLowerCase();
     if (declaredKind === "spreadsheet_static" && !trustedSpreadsheet) {
         localUrl = "";
