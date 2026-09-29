@@ -1,5 +1,7 @@
 "use strict";
 
+import siteOverlay from "./site-overlay.js";
+
 const PUBLIC_PATH_PREFIXES = ["/data/", "/assets/"];
 const RELEASE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HASHED_ASSET_PATTERN = /(?:^|[/_.-])[a-f0-9]{32,}(?:[/_.-]|$)/i;
@@ -375,10 +377,19 @@ async function serveR2Object(request, env, path) {
     return jsonError(503, "Public release is not configured");
   }
 
-  const key = `releases/${currentReleaseId}/${path}`;
+  // A reviewed UI-only release may reuse the verified corpus without copying it.
+  // Only exact manifest entries can override the pinned base release.
+  const overlay = currentReleaseId === siteOverlay.base_release
+    && path.startsWith("site/") && Object.hasOwn(siteOverlay.objects, path)
+    ? siteOverlay.objects[path] : null;
+  const objectRelease = overlay ? siteOverlay.release : currentReleaseId;
+  const key = `releases/${objectRelease}/${path}`;
   const object = await env.PUBLIC_CORPUS.head(key);
   if (object === null) {
     return jsonError(404, "Not found");
+  }
+  if (overlay && (object.size !== overlay.size || object.customMetadata?.sha256 !== overlay.sha256)) {
+    return jsonError(503, "Site release integrity check failed");
   }
 
   const conditionStatus = preconditionStatus(request, object);

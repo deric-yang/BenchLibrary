@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>活动专区 · KW Bench Library</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../benchlist.css">
+<style>
+    body { margin: 0; overflow: hidden; }
+    .site-nav { position: relative; min-height: 80px; height: auto; }
+    .benchlist-nav a:first-child { display: block; }
+    .activity-frame { display: block; width: 100%; height: calc(100dvh - 80px); border: 0; }
+    @media (max-width: 700px) {
+        .site-nav { height: 108px; flex-wrap: wrap; justify-content: center; gap: 4px; padding: 8px 12px; }
+        .benchlist-nav { margin: 0; }
+        .brand-copy small { display: none; }
+        .brand-mark { width: 30px; height: 30px; }
+        .brand { width: 100%; justify-content: center; }
+        .activity-frame { height: calc(100dvh - 108px); }
+    }
+</style>
+</head>
+<body>
+    <header class="site-nav">
+        <a class="brand" href="../" aria-label="KW Bench Library 首页">
+            <span class="brand-mark" aria-hidden="true"><span>K</span><span>W</span></span>
+            <span class="brand-copy">
+                <strong>KW Bench Library</strong>
+                <small>Knowledge Work · Artifact Benchmarks</small>
+            </span>
+        </a>
+        <nav class="benchlist-nav" aria-label="功能模块">
+            <a href="../" id="benchlistCatalogLink">评测题库</a>
+            <a href="../#view=benchlist" id="openBenchList">BenchList <span>引用审计</span></a>
+            <a href="./" aria-current="page" id="openActivities">活动专区</a>
+        </nav>
+    </header>
+<main><iframe class="activity-frame" src="vibemotion/" title="VibeMotionBench 路演" allow="fullscreen" allowfullscreen></iframe></main>
+</body>
+</html>

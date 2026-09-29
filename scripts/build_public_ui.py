@@ -196,6 +196,8 @@ def regex_replace_once(
 def build_index(source: str) -> str:
     """Remove private controls and add public runtime configuration."""
     html = source
+    html = html.replace('        </nav>',
+                        '            <a href="activities/" id="openActivities">活动专区</a>\n        </nav>', 1)
     for element_id in ("openIngestionSidebar", "openIngestionHome"):
         html = regex_replace_once(
             html,

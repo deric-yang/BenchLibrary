@@ -371,3 +371,14 @@ npx wrangler rollback "$KWBL_PREVIOUS_WORKER_VERSION" \
 - 公网代码改动通过 GitHub `main` 协作；大文件不提交 Git，只经 exporter 进入 R2。
 - 每次发布记录 Git commit、源 immutable release、policy id、公开 release id、R2 inventory 摘要、旧/新 Worker 指针和验收结果。
 - 同事新增 Benchmark 时，应提交固定来源 revision、字段映射、期望任务数、分片 SHA、署名/许可/NOTICE 与修改说明；策略未显式列出的内容继续 fail closed。
+
+## 已验证数据版本上的 UI 增量发布（2026-09-29）
+
+仅涉及展示页面、导航和独立活动素材，且不改变 corpus、策略或 BenchList 数据时，允许使用
+[活动专区的精确路径增量流程](ACTIVITIES.md#ui-增量发布)。此流程扩展上文的单 release 模型：
+保留已完整验证的 `PUBLIC_RELEASE_ID`，在版本化 Worker module 中固定增量 release、base release
+和逐对象清单。生产仍恰好两个 bindings；新增对象不覆盖历史内容。
+
+只需上传并完整验证增量集合，不复制或重新上传原有 20 GB 语料。发布记录必须同时记载数据 release、
+增量 release、两个模块的哈希、全部增量对象的校验结果，以及前一 Worker version 作为回滚点。
+普通题库/策略变更仍走完整导出与 inventory 流程，不适用此例外。
