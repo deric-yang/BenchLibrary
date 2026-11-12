@@ -445,6 +445,14 @@ async function handleRequest(request, env) {
     return response;
   }
 
+  // Canonical entry URLs for the two reviewed activity directories.
+  if (url.pathname === "/activities" || url.pathname === "/activities/skill-audit") {
+    url.pathname += "/";
+    const headers = new Headers({ Location: url.toString(), "Cache-Control": "public, max-age=300" });
+    applySecurityHeaders(headers);
+    return new Response(null, { status: 308, headers });
+  }
+
   if (!isPublicObjectPath(url.pathname)) {
     if (env.STATIC_ASSETS && typeof env.STATIC_ASSETS.fetch === "function") {
       const response = await env.STATIC_ASSETS.fetch(request);

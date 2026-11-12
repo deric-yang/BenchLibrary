@@ -1,15 +1,15 @@
 // Generated from config/activity_release.json. Reviewed immutable site objects only.
 export default {
   "base_release": "20260919-file-merge-v5",
-  "release": "20260929-activities-v1",
+  "release": "20261112-skill-audit-v1",
   "objects": {
     "site/index.html": {
       "size": 19785,
       "sha256": "499032e57488e55fe2e061698b4c48967be00d0674b72a5f867b73b5026845e2"
     },
     "site/activities/index.html": {
-      "size": 1843,
-      "sha256": "296907232de3f9e020502e8bd2f0f4f183df270176d1019f715b005c0eefe95b"
+      "size": 2303,
+      "sha256": "28b9c211deb91d2b0ed7cd11f58b64e0cebb4921a615c5221db2b774ff043652"
     },
     "site/activities/vibemotion/assets/thumbs/t1_dataviz.jpg": {
       "size": 33264,
@@ -78,6 +78,18 @@ export default {
     "site/activities/vibemotion/presentation.js": {
       "size": 5508,
       "sha256": "3c37eafaba7798fc8cda8471270f1cdb682beaf51d9e017d60eb60f474878076"
+    },
+    "site/activities/skill-audit/index.html": {
+      "size": 31857,
+      "sha256": "ecdbede582aedb8cb85f018f67a3d1d03169f0a5201ceb51cc7710c548e34bc1"
+    },
+    "site/activities/skill-audit/styles.css": {
+      "size": 8986,
+      "sha256": "d994edf7e6518863bdd906bc67494e83fb41a9c3f5615caf945e3d0db099ed62"
+    },
+    "site/activities/skill-audit/app.js": {
+      "size": 1942,
+      "sha256": "42887755c6aef523fdeacbbd65b4cf72a1e1bcca701bc0250aaf64d15a067023"
     }
   }
 };

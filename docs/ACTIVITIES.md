@@ -1,7 +1,11 @@
 # 活动专区
 
-入口为 `/activities/`，第一项为 VibeMotionBench 六屏路演；首页导航在 BenchList 后提供“活动专区”。
-活动页保留三个模块入口，用同源 iframe 隔离路演的样式和滚动。视频按点击加载，支持全屏及 HTTP Range。
+入口为 /activities/；首页导航在 BenchList 后提供“活动专区”。活动首页现在列出两个独立专题：
+
+- /activities/skill-audit/：2026-11-12 脱敏 Skill 评测归因看板，含 43 条首要归因索引、8 个典型案例及单列的新重跑复核。公开内容均为概述，不含真实商家、个人标识、原始会话、内部 Trace、代码路径或凭据。展示编号没有公开到内部案例的映射。筛选、搜索、展开与深色模式均在浏览器本地运行。
+- /activities/vibemotion/：保留既有 VibeMotionBench 六屏路演及所有视频素材。视频按点击加载，支持全屏及 HTTP Range。
+
+/activities 和 /activities/skill-audit 会以 308 跳转到对应的带尾部斜杠地址，保留 query；未列出的路径不做通配跳转。
 
 ## 来源与维护
 
