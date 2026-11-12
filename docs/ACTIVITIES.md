@@ -39,4 +39,4 @@
 以后发布完整 corpus 时，将本模块合入完整的 `site/` 导出并移除或更新 overlay；
 不得只更改 base_release 以套用未重新核验的增量清单。旧数据与增量对象均须保留供回滚。
 
-完整案例 payload 位于被 Git 忽略的 site/activities/skill-audit/cases/。重建 overlay 必须使用开发机固定候选材料，普通代码克隆不会自动取得这些业务数据。引用闭包明确列出 44 个 JSON，不允许目录通配。原始 Trace 二进制归档不属于本站发布闭包；结构化提取范围及其限制在逐案材料中保留。\n
+完整案例 payload 位于被 Git 忽略的 site/activities/skill-audit/cases/。重建 overlay 必须使用开发机固定候选材料，普通代码克隆不会自动取得这些业务数据。引用闭包明确列出 44 个 JSON，不允许目录通配。原始 Trace 二进制归档不属于本站发布闭包；结构化提取范围及其限制在逐案材料中保留。
