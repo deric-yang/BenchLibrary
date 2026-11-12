@@ -1,102 +1,78 @@
 'use strict';
 const owners={judge:'评测判定',tool:'工具',execution:'执行',model_api:'模型接口',runtime:'运行时 / 权限',unknown:'尚不确定'};
-let active='all',rows=[];
-const search=document.querySelector('#case-search'),list=document.querySelector('#case-list');
-function node(tag,text,cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
-function pretty(v){if(typeof v==='string'){try{return JSON.stringify(JSON.parse(v),null,2);}catch{return v;}}return JSON.stringify(v,null,2);}
-function code(v){return node('pre',pretty(v),'evidence-code');}
-function fold(title,child,open=false){const d=node('details',undefined,'evidence-fold');d.append(node('summary',title));const b=node('div',undefined,'fold-body');b.append(child);d.append(b);d.open=open;return d;}
-function field(container,label,value){if(value===undefined||value===null)return;container.append(node('dt',label));const dd=node('dd');if(Array.isArray(value)){const ul=node('ul');for(const x of value)ul.append(node('li',typeof x==='object'?pretty(x):String(x)));dd.append(ul);}else dd.textContent=typeof value==='object'?pretty(value):String(value);container.append(dd);}
-function applyFilter(){const q=search.value.trim().toLowerCase();let count=0;for(const r of rows){const show=(active==='all'||r.dataset.owner===active)&&r.dataset.search.toLowerCase().includes(q);r.hidden=!show;if(show)count++;}document.querySelector('#result-count').textContent=count+' 条';document.querySelector('#empty').hidden=count>0;document.querySelectorAll('[data-filter]').forEach(b=>{const on=b.dataset.filter===active;b.classList.toggle('active',on);b.setAttribute('aria-pressed',String(on));});}
-document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{active=b.dataset.filter;applyFilter();}));
-document.querySelectorAll('[data-owner-filter]').forEach(b=>b.addEventListener('click',()=>{active=b.dataset.ownerFilter;search.value='';applyFilter();document.querySelector('#catalog').scrollIntoView();}));
-search.addEventListener('input',applyFilter);
-const themeButton=document.querySelector('#theme-toggle');
-function theme(mode){document.documentElement.dataset.theme=mode;themeButton.textContent=mode==='dark'?'浅色':'深色';themeButton.setAttribute('aria-label',mode==='dark'?'切换浅色模式':'切换深色模式');}
-let saved=null;try{saved=localStorage.getItem('benchlibrary-audit-theme')}catch{}
-theme(saved==='dark'?'dark':'light');
-themeButton.addEventListener('click',()=>{const mode=document.documentElement.dataset.theme==='dark'?'light':'dark';theme(mode);try{localStorage.setItem('benchlibrary-audit-theme',mode)}catch{}});
-const labels={issue_title:'问题标题',primary_owner:'首要责任',confidence:'置信度（审阅原文）',historical_fail_is_supported:'历史 Fail 是否得到支持',skill_only_fix_supported:'是否支持仅修改 Skill',concrete_root_cause:'具体根因',earliest_deviation:'最早偏离点',expected_behavior:'期望行为',actual_behavior:'实际行为',skill_clause:'对应 Skill 条款',evidence_paths:'证据位置',alternative_explanations:'替代解释与反证',proposed_minimal_skill_change:'Skill 修改建议',regression_assertions:'回归断言',protected_normal_behavior:'需要保护的正常行为',uncertainties:'尚未解决的问题'};
-function diagnosisView(d){const dl=node('dl',undefined,'diagnosis');for(const [key,value]of Object.entries(d)){if(key==='case_id')continue;field(dl,labels[key]||key,value);}return dl;}
-function trajectoryView(t){
- const wrap=node('div',undefined,'trajectory');
- wrap.append(node('p',t.message_reconstruction||'本页按结构化轨迹展示。','caption'));
- let previous=[];
- for(const event of t.events){
-  const main=event.kind==='main_llm',body=node('div');
-  const identity=event.input?.tool_code||event.input?.tool_name||event.model||event.kind;
-  const title='#'+event.event_index+' · '+(main?'模型请求':event.kind==='skill_load'?'加载 Skill':'工具调用')+' · '+(typeof identity==='object'?pretty(identity):identity);
-  const meta=node('dl',undefined,'event-meta');
-  field(meta,'事件路径',event.source_span_path);
-  if(main){
-   field(meta,'模型记录',event.model);field(meta,'场景',event.scene);
-   const prefix=event.message_common_prefix_with_previous_main;
-   if(!Number.isInteger(prefix)||prefix<0||prefix>previous.length){
-    body.append(node('p','消息恢复失败：公共前缀范围异常；保留原始事件供核对。','error'));previous=[];
-   }else{
-    const messages=previous.slice(0,prefix).concat(event.message_tail||[]);previous=messages;
-    const msgs=node('div',undefined,'messages');
-    for(const [i,m]of messages.entries()){const item=node('div',undefined,'message');item.append(node('h4',String(i)+' · '+String(m.role||m.type||'message')),code(m));msgs.append(item);}
-    body.append(fold('模型输入上下文 · '+messages.length+' 条消息（恢复公共前缀）',msgs));
-   }
-  }else if(event.input!==undefined)body.append(fold('完整调用输入',code(event.input),true));
-  body.prepend(meta);
-  body.append(fold('完整调用输出 / 错误',code(event.output),true));
-  const out=event.output;
-  if(out&&typeof out==='object')for(const k of ['app_state','output_json'])if(typeof out[k]==='string'&&out[k]){try{body.append(fold(k+' · JSON 解码视图',code(JSON.parse(out[k]))));}catch{}}
-  body.append(fold('该事件原始 JSON',code(event)));
-  wrap.append(fold(title,body));
- }
- return wrap;
+const roles={user:'用户',assistant:'助手',tool:'工具',system:'系统'};
+const detail=document.querySelector('#case-detail'),list=document.querySelector('#case-list'),search=document.querySelector('#case-search'),filter=document.querySelector('#owner-filter'),workspace=document.querySelector('#workspace');
+let index=[],selected=null,visible=[],ticket=0;const cache=new Map();
+function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
+function pretty(v){if(typeof v==='string'){try{return JSON.stringify(JSON.parse(v),null,2)}catch{return v}}return JSON.stringify(v,null,2);}
+function code(v,cls='evidence-code'){return el('pre',typeof v==='string'?v:pretty(v),cls);}
+function fold(title,child,open=false,cls=''){const n=el('details',undefined,'evidence-fold '+cls);n.append(el('summary',title));const b=el('div',undefined,'fold-body');b.append(child);n.append(b);n.open=open;return n;}
+function field(dl,label,value){if(value===undefined||value===null)return;dl.append(el('dt',label));const dd=el('dd');if(Array.isArray(value)){const ul=el('ul');for(const v of value)ul.append(el('li',typeof v==='object'?pretty(v):String(v)));dd.append(ul);}else dd.textContent=typeof value==='object'?pretty(value):String(value);dl.append(dd);}
+const labels={issue_title:'问题标题',primary_owner:'首要责任',confidence:'置信度原文',historical_fail_is_supported:'历史 Fail 是否得到支持',skill_only_fix_supported:'是否支持仅修改 Skill',concrete_root_cause:'具体根因',earliest_deviation:'最早偏离点',expected_behavior:'期望行为',actual_behavior:'实际行为',skill_clause:'对应 Skill 条款',evidence_paths:'证据位置',alternative_explanations:'替代解释与反证',proposed_minimal_skill_change:'Skill 修改建议',regression_assertions:'回归断言',protected_normal_behavior:'需要保护的正常行为',uncertainties:'尚未解决的问题'};
+function diagnosis(d){const dl=el('dl',undefined,'diagnosis');for(const[k,v]of Object.entries(d))if(k!=='case_id')field(dl,labels[k]||k,v);return dl;}
+function message(m,i){const n=el('article',undefined,'chat-message role-'+(m.role||'unknown'));n.dataset.role=m.role||'unknown';n.append(el('h4',(roles[m.role]||m.role||'消息')+' · '+i));if(m.content!==undefined&&m.content!==null&&m.content!=='')n.append(code(m.content,'message-content'));if(m.tool_calls?.length)n.append(code(m.tool_calls));if(m.content===undefined||m.content===null||m.content==='')n.append(el('p',m.tool_calls?.length?'此消息为工具调用，未提供文字正文。':'源记录没有提供文字正文。','caption'));n.append(fold('查看该消息原始结构',code(m)));return n;}
+function messagesView(items){const n=el('div',undefined,'messages');items.forEach((m,i)=>n.append(message(m,i)));return n;}
+function contexts(t){let previous=[];const result=new Map();for(const e of t.events){if(e.kind!=='main_llm')continue;const count=e.message_common_prefix_with_previous_main;if(!Number.isInteger(count)||count<0||count>previous.length)throw Error('模型消息公共前缀异常，无法可靠恢复上下文');previous=previous.slice(0,count).concat(e.message_tail||[]);result.set(e.event_index,previous);}return result;}
+function textBlock(title,text,cls){const n=el('section',undefined,'chat-message '+cls);n.append(el('h3',title));if(typeof text==='string'&&text.length)n.append(code(text,'message-content'));else n.append(el('p','不可用：源材料未提供此正文。','unavailable'));return n;}
+function outputView(s,e){const n=el('div',undefined,'model-output');if(e.output?.error){n.append(el('p','请求失败，未将后续回退模型的输出算到本次请求。','caption'),code(e.output.error));return n;}if(!s?.response_id_match){n.append(el('p','不可用：未取得与本次 response_id 匹配的输出证据。','unavailable'));return n;}
+ for(const text of s.model_output_texts||[])n.append(code(text,'message-content model-original-text'));
+ if(s.tool_calls?.length){if(!s.model_output_texts?.length)n.append(el('p','此请求的原始输出是工具调用，未产生文字回答。','caption'));n.append(code(s.tool_calls,'evidence-code model-tool-calls'));}
+ if(!s.model_output_texts?.length&&!s.tool_calls?.length)n.append(el('p','不可用：源记录未保留可展示的文字或工具调用。','unavailable'));
+ const source=s.model_output_source==='provider_output_item_done'?'provider 的 output_item.done':s.model_output_source==='raw_output_text_done'?'原始 output_text.done':s.model_output_source==='tool_calls_only'?'模型返回的 function call':'源记录';
+ n.append(el('p','来源：'+source+' · '+(s.model_actual||e.model||'模型标识未提供')+' · 事件 #'+e.event_index,'caption'));
+ if(s.model_output_retention?.truncated||s.model_output_metadata_truncated)n.append(el('p','源 Trace 标记部分元数据被截断；已保留可取得的输出，不能据此宣称完整原始流。','unavailable'));
+ return n;
 }
-async function loadCase(row,item,body){
- if(row.dataset.loaded==='true'||row.dataset.loading==='true')return;
- row.dataset.loading='true';body.replaceChildren(node('p','正在加载完整证据…','loading'));
- try{
-  const res=await fetch('cases/'+item.file,{credentials:'omit'});if(!res.ok)throw Error('HTTP '+res.status);
-  const bytes=await res.arrayBuffer();
-  if(bytes.byteLength!==item.bytes)throw Error('案例字节数不匹配');
-  const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');
-  if(hash!==item.sha256)throw Error('案例 SHA-256 不匹配');
-  const data=JSON.parse(new TextDecoder().decode(bytes));
-  if(data.case_id!==item.case_id||data.display_id!==item.id)throw Error('案例身份不匹配');
-  body.replaceChildren();
-  const links=node('div',undefined,'case-actions');
-  const direct=node('a','此案例直达链接');direct.href='#case-'+item.id;
-  const download=node('a','下载本案例完整 JSON');download.href='cases/'+item.file;download.download=item.id+'.json';
-  links.append(direct,download);body.append(links);
-  const intro=node('dl',undefined,'diagnosis');field(intro,'原始案例编号',data.case_id);field(intro,'原始提问',data.trajectory.source_query);
-  field(intro,'首要责任',owners[item.owner]);field(intro,'置信度',data.diagnosis.confidence);field(intro,'具体根因',data.diagnosis.concrete_root_cause);
-  body.append(intro);
-  body.append(fold('完整诊断 · 现象、根因、条款、反证与回归断言',diagnosisView(data.diagnosis),true));
-  body.append(fold('历史回答 · 完整原文',code(data.trajectory.historical_answer)));
-  const judges=node('div',undefined,'judges');
-  for(const[id,value]of Object.entries(data.historical_machine_evaluation.labels||{})){
-   const j=node('section',undefined,'judge-rule');j.append(node('h4','原评测规则 '+id),code(value));judges.append(j);
-  }
-  body.append(fold('历史评测 · 全部标签和理由（不视为真值）',judges));
-  body.append(fold('执行轨迹 · 全部 '+data.trajectory.events.length+' 个业务事件',trajectoryView(data.trajectory)));
-  if(data.adjudicated)body.append(fold('初次诊断 · 保留后续裁定前的原记录',diagnosisView(data.initial_diagnosis)));
-  body.append(fold('来源校验与提取范围',code({provenance:data.source_provenance,publication_note:data.publication_note,message_reconstruction:data.trajectory.message_reconstruction})));
-  body.append(fold('完整材料 · JSON 原文',code(data)));
-  row.dataset.loaded='true';
- }catch(e){const p=node('p','证据加载失败：'+e.message+'。案例仍保留在统计分母中。','error');const b=node('button','重新加载','chip');b.addEventListener('click',()=>loadCase(row,item,body));body.replaceChildren(p,b);}
- finally{delete row.dataset.loading;}
+function timeline(data,ctx){const n=el('div',undefined,'agent-timeline');const by=new Map((data.viewer_evidence?.events||[]).map(x=>[x.event_index,x]));
+ for(const e of data.trajectory.events){const main=e.kind==='main_llm',s=by.get(e.event_index),body=el('div'),head=el('span',undefined,'event-title');
+ const name=main?(s?.model_actual||e.model||'模型标识未提供'):(e.input?.tool_code||e.input?.tool_name||e.kind);
+ head.append(el('span','#'+e.event_index+' · '+(main?'模型请求':e.kind==='skill_load'?'加载 Skill':'工具调用'),'event-kicker'),el('strong',typeof name==='string'?name:pretty(name)));
+ const status=main?(e.output?.error?'请求失败':e.output?.status||'状态未提供'):(e.output?.status||'状态见原始记录');head.append(el('span',status,'event-status'+(e.output?.error?' failed':'')));
+ if(main){body.append(outputView(s,e));body.append(fold('本次模型的完整输入 · '+(ctx.get(e.event_index)?.length||0)+' 条消息',messagesView(ctx.get(e.event_index)||[])));}
+ else{if(e.input!==undefined){body.append(el('h4','原始调用参数'),code(e.input));}else body.append(el('p','调用输入不可用：源材料未提供。','unavailable'));body.append(el('h4','工具返回'),code(e.output));for(const k of ['output_json','app_state'])if(typeof e.output?.[k]==='string'){try{body.append(fold(k+' 解码视图',code(JSON.parse(e.output[k]))));}catch{}}}
+ body.append(fold('完整事件与补充证据',code({event:e,evidence:s||null})));const d=fold('',body,false,'agent-event');d.firstChild.replaceChildren(head);n.append(d);}
+ return n;
 }
-function jump(){const id=location.hash.slice(1);const target=document.getElementById(id);if(target&&target.classList.contains('case-row')){active='all';search.value='';applyFilter();target.open=true;target.scrollIntoView({block:'start'});}}
-async function init(){
- try{
-  const res=await fetch('cases/index.json',{credentials:'omit'});if(!res.ok)throw Error('HTTP '+res.status);
-  const data=await res.json();if(data.total_cases!==43||data.cases.length!==43)throw Error('案例数量不符');
-  list.replaceChildren();
-  for(const item of data.cases){
-   const row=node('details',undefined,'case-row full-case');row.id='case-'+item.id;row.dataset.owner=item.owner;row.dataset.search=[item.id,item.case_id,item.title,item.query,item.root_cause,owners[item.owner]].join(' ');
-   const summary=node('summary');summary.append(node('span',item.id+' · '+owners[item.owner]+' · '+item.events+' 个事件','case-meta'),node('h3',item.title),node('p',item.query,'case-query'));
-   const verdict=node('span',item.historical_fail_is_supported?'历史异常有证据支持':'历史异常需复核','verdict');
-   summary.append(verdict,node('span','展开完整案例 ＋','expand'));
-   const body=node('div',undefined,'full-case-body');row.append(summary,body);row.addEventListener('toggle',()=>{if(row.open)loadCase(row,item,body);});list.append(row);
-  }
-  rows=[...list.children];applyFilter();jump();window.addEventListener('hashchange',jump);
- }catch(e){list.replaceChildren(node('p','案例列表读取失败：'+e.message+'。请刷新重试。','error'));}
+function historyView(data,ctx){const first=data.trajectory.events.find(e=>e.kind==='main_llm');const all=first?ctx.get(first.event_index):null;const anchor=data.viewer_evidence?.first_context_current_query_index;const body=el('div');let title,kind;
+ if(!all){title='前文不可用 · 源材料未提供模型输入';kind='unavailable';body.append(el('p','不可用：源材料未提供首轮模型上下文，不能判断是否存在前文。','unavailable'));}
+ else if(!Number.isInteger(anchor)){title='前文边界不可用 · 展开完整首轮上下文';kind='boundary_unavailable';body.append(el('p','未能精确匹配当前 query 的消息边界，无法可靠区分前文与当前轮。以下原样保留完整首轮输入。','unavailable'),messagesView(all));}
+ else{const previous=all.slice(0,anchor).filter(m=>m.role!=='system');const hasDialogue=previous.some(m=>m.role==='user'||m.role==='assistant');if(hasDialogue){kind='recorded';title='已有前文 · '+previous.length+' 条消息 · 默认折叠';body.append(el('p','以下是本次模型输入中、当前 query 之前记录的用户、助手与工具消息。系统指令可在完整上下文中查看。','caption'),messagesView(previous));}else{kind='not_provided';title='前文 · 源材料未提供更早对话';body.append(el('p','首轮模型输入未记录更早的用户 / 助手对话。这不代表商家从未有过前文，也不代表长期记忆或运行时状态为空。','unavailable'));}}
+ const d=fold(title,body,false,'prior-context');d.dataset.historyKind=kind;const wrap=el('div',undefined,'context-area');wrap.append(d);if(all)wrap.append(fold('完整首轮模型上下文 · '+all.length+' 条消息（含系统指令与当前请求）',messagesView(all),false,'full-first-context'));return wrap;
 }
+function sourceView(p){const body=document.querySelector('#source-method-body');body.replaceChildren();const lines=[
+ '来源：Builder 评测任务 '+p.task_id+'，数据集 '+p.dataset_id+'；源日期 '+p.dates[0]+' 至 '+p.dates[1]+'。候选池固定为 '+p.candidate_pool+' 条，不代表线上全集。',
+ '先按商家、会话与长 Query 近重复合并为 '+p.groups+' 个关联组，再隔离为开发 '+p.development+' 条、验证 '+p.validation+' 条。本页仅包含开发侧 '+p.selected+' 条；未展示或使用验证内容。',
+ '目标异常组选取已加载目标 Skill、任一有效历史规则出现 Fail 的开发案例，并排除独立标记为其他工具安全性不确定的样本，共 '+p.target_loaded_historical_fail+' 条；另取未包含在该组中的路由 Fail '+p.additional_routing_fail+' 条。',
+ '43 条原始 Trace 的入口：'+p.root_span_counts.schedule_task_execute_triggered_run+' 条定时任务触发、'+p.root_span_counts.ChatStream+' 条 ChatStream 对话。定时任务 query 不应被误称为商家当时手工输入的 IM 消息。',
+ '开发池中 '+p.prior_exposed_development+' / '+p.development+' 条属于历史曝光或关联重复组；这是开发池口径，不是本页 43 条的单独曝光统计。非随机选样、历史污染和近重复风险限制结论外推。',
+ '完整 Trace 另有 318 个 LLM Span：279 次确认生成、38 个未确认观测与 1 个纯包装节点。它包括摘要、标题和意图分析等辅助调用；未确认观测不作为成功生成。',
+ '历史 Fail 只用于发现候选，归因由模型结合 Trace、Skill 与只读代码审阅形成，仍有待业务方裁定。5 次新 V0 重跑及 25 次判分在页面下方单列，不并入这 43 条历史分布。',
+ '依据：冻结分桶汇总、目标异常选择清单、额外路由异常选择清单、最终归因账本与原始 Trace。当前展示补充了模型原始输出证据；既有 43 条材料完整保留。'
+ ];lines.forEach(t=>body.append(el('p',t)));
+ const summary=document.querySelector('#owner-summary');for(const[k,label]of Object.entries(owners)){const count=index.filter(x=>x.owner===k).length;const b=el('button',label+' '+count,'owner-pill');b.addEventListener('click',()=>{filter.value=k;search.value='';applyFilter();workspace.scrollIntoView({block:'start'});});summary.append(b);}
+}
+function applyFilter(){const q=search.value.trim().toLowerCase();visible=index.filter(x=>(filter.value==='all'||x.owner===filter.value)&&[x.id,x.case_id,x.title,x.query,x.root_cause,owners[x.owner]].join(' ').toLowerCase().includes(q));const ids=new Set(visible.map(x=>x.id));for(const b of list.children)b.hidden=!ids.has(b.dataset.id);document.querySelector('#result-count').textContent=visible.length+' 条';document.querySelector('#empty').hidden=visible.length>0;}
+function markSelected(id){for(const b of list.children){const on=b.dataset.id===id;b.classList.toggle('selected',on);b.setAttribute('aria-current',on?'true':'false');}document.querySelector('#mobile-current').textContent=id;document.querySelector('#case-picker').setAttribute('aria-expanded','false');workspace.classList.remove('picker-open');}
+function render(data,item){const ctx=contexts(data.trajectory),by=new Map(data.viewer_evidence.events.map(x=>[x.event_index,x]));const root=el('article',undefined,'selected-case');root.dataset.caseId=item.id;
+ const heading=el('div',undefined,'detail-heading');heading.append(el('span',item.id+' · '+owners[item.owner]+' · '+item.events+' 个业务事件','case-meta'),el('h2',item.title));
+ const links=el('div',undefined,'case-actions');const link=el('a','此案例直达');link.href='#case-'+item.id;const download=el('a','下载完整 JSON');download.href='cases/'+item.file;download.download=item.file;links.append(link,download);heading.append(links);root.append(heading);
+ const cause=el('section',undefined,'root-cause');cause.append(el('span','本案根因','eyebrow'),el('p',data.diagnosis.concrete_root_cause,'root-cause-text'),el('div','置信度：'+data.diagnosis.confidence,'confidence'),el('div',data.diagnosis.skill_only_fix_supported?'当前诊断支持目标 Skill 修改':'当前未建立仅修改目标 Skill 的充分依据','skill-responsibility'));root.append(cause);
+ const jump=el('nav',undefined,'detail-jumps');[['conversation','对话'],['trajectory','操作轨迹'],['diagnosis','完整诊断'],['judges','历史评测']].forEach(([name,text])=>{const b=el('button',text);b.addEventListener('click',()=>root.querySelector('[data-section="'+name+'"]').scrollIntoView({block:'start'}));jump.append(b);});root.append(jump);
+ const conversation=el('section',undefined,'case-section');conversation.dataset.section='conversation';conversation.append(el('h3','原始对话与输出'),historyView(data,ctx),textBlock('原始 Query · 源任务问题全文',data.trajectory.source_query,'role-user query-block'));
+ const mains=data.trajectory.events.filter(e=>e.kind==='main_llm'),last=mains.at(-1),output=el('section',undefined,'chat-message role-assistant raw-answer-block');output.append(el('h3','模型原始输出 · 末次模型请求'));if(last)output.append(outputView(by.get(last.event_index),last));else output.append(el('p','不可用：源材料未提供模型请求。','unavailable'));conversation.append(output);
+ const delivered=textBlock('历史交付回答 · 源记录全文',data.trajectory.historical_answer,'role-delivery delivery-block');delivered.append(el('p','保留卡片协议和原始文本；卡片占位符由工具 / 框架展开后的内容，不等同于模型逐字生成。','caption'));conversation.append(delivered);root.append(conversation);
+ const trace=el('section',undefined,'case-section');trace.dataset.section='trajectory';trace.append(el('h3','Agent 操作轨迹'),el('p','完整 Trace 的实际调用、Loop、模型输入与原始输出在下方对照；业务事件流水另行保留。','caption'));const atlas=el('div',undefined,'atlas-host');trace.append(atlas,fold('原始业务事件流水 · '+data.trajectory.events.length+' 个事件',timeline(data,ctx)));root.append(trace);
+ const diag=el('section',undefined,'case-section');diag.dataset.section='diagnosis';diag.append(fold('完整诊断 · 行为、条款、反证与回归断言',diagnosis(data.diagnosis)));if(data.adjudicated)diag.append(fold('初次诊断 · 后续裁定前的原记录',diagnosis(data.initial_diagnosis)));root.append(diag);
+ const judges=el('section',undefined,'case-section');judges.dataset.section='judges';const j=el('div');for(const[id,value]of Object.entries(data.historical_machine_evaluation.labels||{})){j.append(el('h4','原评测规则 '+id),code(value));}judges.append(fold('历史评测 · 全部标签和理由',j),fold('来源与完整材料 JSON',code(data)));root.append(judges);
+ detail.replaceChildren(root);detail.dataset.loadedCase=item.id;detail.setAttribute('aria-busy','false');detail.scrollTop=0;window.mountTraceAtlas(atlas,item);return root;
+}
+async function select(id,{navigate=true,mobileScroll=false}={}){const item=index.find(x=>x.id===id);if(!item)return;selected=id;markSelected(id);const my=++ticket;detail.querySelector('.atlas-host')?.atlasCleanup?.();detail.setAttribute('aria-busy','true');detail.removeAttribute('data-loaded-case');detail.replaceChildren(el('p','正在读取 '+id+' 的完整证据…','loading'));if(navigate)history.pushState(null,'','#case-'+id);
+ try{let data=cache.get(id);if(!data){const r=await fetch('cases/'+item.file,{credentials:'omit'});if(!r.ok)throw Error('HTTP '+r.status);const bytes=await r.arrayBuffer();const sha=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');if(bytes.byteLength!==item.bytes||sha!==item.sha256)throw Error('案例字节数或 SHA-256 不匹配');data=JSON.parse(new TextDecoder().decode(bytes));if(data.case_id!==item.case_id||data.display_id!==item.id)throw Error('案例身份不匹配');cache.set(id,data);}if(my!==ticket)return;render(data,item);if(mobileScroll&&matchMedia('(max-width: 800px)').matches)detail.scrollIntoView({block:'start'});}
+ catch(e){if(my!==ticket)return;detail.setAttribute('aria-busy','false');const retry=el('button','重新加载','chip');retry.addEventListener('click',()=>select(id,{navigate:false}));detail.replaceChildren(el('p','不可用：'+e.message+'。案例仍保留在统计分母中。','error'),retry);}
+}
+search.addEventListener('input',applyFilter);filter.addEventListener('change',applyFilter);
+document.querySelector('#case-picker').addEventListener('click',()=>{const open=workspace.classList.toggle('picker-open');document.querySelector('#case-picker').setAttribute('aria-expanded',String(open));});
+const themeButton=document.querySelector('#theme-toggle');function theme(v){document.documentElement.dataset.theme=v;themeButton.textContent=v==='dark'?'浅色':'深色';}let saved;try{saved=localStorage.getItem('benchlibrary-audit-theme')}catch{}theme(saved==='dark'?'dark':'light');themeButton.addEventListener('click',()=>{const v=document.documentElement.dataset.theme==='dark'?'light':'dark';theme(v);try{localStorage.setItem('benchlibrary-audit-theme',v)}catch{}});
+function hashSelection(){const id=location.hash.match(/^#case-(C\d{2})$/)?.[1];if(id)select(id,{navigate:false});}
+async function init(){try{const r=await fetch('cases/index.json',{credentials:'omit'});if(!r.ok)throw Error('HTTP '+r.status);const data=await r.json();if(data.total_cases!==43||data.cases.length!==43)throw Error('案例数量不符');index=data.cases;sourceView(data.provenance);list.replaceChildren();for(const item of index){const b=el('button',undefined,'case-option');b.dataset.id=item.id;b.dataset.owner=item.owner;b.append(el('span',item.id+' · '+owners[item.owner],'case-meta'),el('strong',item.title),el('span',item.query,'case-preview'));b.addEventListener('click',()=>select(item.id,{mobileScroll:true}));list.append(b);}applyFilter();window.addEventListener('hashchange',hashSelection);window.addEventListener('popstate',hashSelection);const id=location.hash.match(/^#case-(C\d{2})$/)?.[1];await select(index.some(x=>x.id===id)?id:index[0].id,{navigate:false});}catch(e){detail.replaceChildren(el('p','不可用：'+e.message,'error'));detail.setAttribute('aria-busy','false');}}
 init();

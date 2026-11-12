@@ -1,7 +1,7 @@
 // Generated from config/activity_release.json. Reviewed immutable site objects only.
 export default {
   "base_release": "20260919-file-merge-v5",
-  "release": "20261112-skill-audit-v2",
+  "release": "20261112-skill-audit-v3",
   "objects": {
     "site/index.html": {
       "size": 19785,
@@ -80,192 +80,372 @@ export default {
       "sha256": "3c37eafaba7798fc8cda8471270f1cdb682beaf51d9e017d60eb60f474878076"
     },
     "site/activities/skill-audit/index.html": {
-      "size": 9704,
-      "sha256": "0d5241cc42f57883d0fef579edb4bc48c7767973e19499c0b358d2693b423f02"
+      "size": 7544,
+      "sha256": "c23dd19065ba6573718f10da8cf5e1b5285d10d8eeda02f86266b341d1bc0e6e"
     },
     "site/activities/skill-audit/styles.css": {
-      "size": 11357,
-      "sha256": "ca3eb15c88fbcc1fa2e65ff6736245f4d712495b1aa8e46da1426d7e9af51e88"
+      "size": 20298,
+      "sha256": "f3cb3627a9103f5f155d239fb2e141c9b164be0864e2475e211086ac7f011cc1"
     },
     "site/activities/skill-audit/app.js": {
-      "size": 9959,
-      "sha256": "5319da8542b31a691ce08d6e2d3079289b4904a06bcf6e21c0f9c7cd7f20205f"
+      "size": 18920,
+      "sha256": "dde05b502423907ee472ace75b77c7fc8211691cae6078ff7ee2853bd164deec"
     },
     "site/activities/skill-audit/cases/C01.json": {
-      "size": 502759,
-      "sha256": "581b9a63cb97e9af77295bc169b09d5f10cceba5e714532e7de363fcdfa244db"
+      "size": 511167,
+      "sha256": "9c21c8e5493920878d5de9a22dae84c5e22c23c95e4d79e236f4dd3bc291f5f4"
     },
     "site/activities/skill-audit/cases/C02.json": {
-      "size": 307243,
-      "sha256": "88abaaec481e9b4d21ed8c77266bab42db23c07e9397bb14922bf4f98674cf58"
+      "size": 319246,
+      "sha256": "094c9fe1862fc27b265b1038fc6c33bb903d6ecda6d2ae770f19c0660e1b1bc5"
     },
     "site/activities/skill-audit/cases/C03.json": {
-      "size": 593980,
-      "sha256": "b54986b75304a553575a90cb550b42f111c13311dbaf10d65d4fc2fe62bc6619"
+      "size": 606359,
+      "sha256": "cc313e0c02973dfde92d3f0352cb0ebcc209da6a00211895c6d8fee6dc839518"
     },
     "site/activities/skill-audit/cases/C04.json": {
-      "size": 537736,
-      "sha256": "02b4ef15c9d2842a242c6cfca05fab677c059466472ea3d8e6da2c23a6466b4b"
+      "size": 551382,
+      "sha256": "c54527cc66337dd4748077f7eb53ea589cae365d4f4d4e9283a265c37ca1408f"
     },
     "site/activities/skill-audit/cases/C05.json": {
-      "size": 515178,
-      "sha256": "dd8c7ce394b40220bbfda525792f89a874576c89eaf3725d7a67b6f8aed286e8"
+      "size": 529513,
+      "sha256": "9bf8be67e3c833457ee0872df32de2fade07661618062102185fa71490f91bba"
     },
     "site/activities/skill-audit/cases/C06.json": {
-      "size": 495693,
-      "sha256": "f3c11ba86a86b6f5a22bcad33c283fe5448da61a1f4a587d37c63f80baea3b0f"
+      "size": 509271,
+      "sha256": "72d93201dc45fafaca8ce77910ca40b425dcdb1680ac4769efee8a67f67c44e8"
     },
     "site/activities/skill-audit/cases/C07.json": {
-      "size": 373870,
-      "sha256": "498f32a1f0c52144101cb6b06929e75fc25e764e9537ce64ee46380edbe8bf4f"
+      "size": 387438,
+      "sha256": "fb7491e2f233ce2b1132aeae1e33d64ac5839f1b171aebc75ba37f6e6aad965f"
     },
     "site/activities/skill-audit/cases/C08.json": {
-      "size": 535389,
-      "sha256": "ba949edc295415d416bb2eefa0a166301f1f55473b1726af93d8e3fe581bf4a6"
+      "size": 548875,
+      "sha256": "4a83b8ac1831328e1d74aa8f6a4ba65d0b20c722d68747dda375d08b1d7a847b"
     },
     "site/activities/skill-audit/cases/C09.json": {
-      "size": 559688,
-      "sha256": "3dcf8c14e104ba4818ccca85f65588be519779836722f65a669f88486e2ab77a"
+      "size": 573596,
+      "sha256": "d0995f06a44b09d7d28fd615931282d62092caa4ae6332f4dc4ded4e21886f38"
     },
     "site/activities/skill-audit/cases/C10.json": {
-      "size": 228536,
-      "sha256": "b2d330073e16de6da53cca8c189d4b59cfe31ea032bd7a2e47abc9b31a9b6e71"
+      "size": 248824,
+      "sha256": "e80be5775fa91ddef4c9ab2d8dbeb9a948efb2f53f3e2bf623e2d7415ead57bc"
     },
     "site/activities/skill-audit/cases/C11.json": {
-      "size": 408558,
-      "sha256": "70f5164d7b2777946153a64c08a2202c622f922392289deb291d2239cc381467"
+      "size": 423659,
+      "sha256": "66ef68f903aaed76a760517bc56ffde83a345462be64f019fea8a773a24f5bec"
     },
     "site/activities/skill-audit/cases/C12.json": {
-      "size": 603430,
-      "sha256": "73358a9008587a3c73f0e27c0d299a8e77d94c04a826ecf9ad95414bca805fb6"
+      "size": 617859,
+      "sha256": "5574dad4c16a84b5aebdad1d0ce7a1881315c8b7c1a44c64529acaf973c65006"
     },
     "site/activities/skill-audit/cases/C13.json": {
-      "size": 376282,
-      "sha256": "ae6abc2fcc1cde65a8be074866378feaf6d60ceb83528e6cbf73dc712fc8888d"
+      "size": 390547,
+      "sha256": "ab4cb4ecdde8d88d5dee6287a8d941a552a0b7db9f65aebce3b12743a6e85afb"
     },
     "site/activities/skill-audit/cases/C14.json": {
-      "size": 475731,
-      "sha256": "86561d96e81a9c7c0373c4f516a48ddc834410294d410b707cccf8a2c0dad2b5"
+      "size": 490026,
+      "sha256": "adb30f50593f519ee1bb27b313aafe1a7ad4d0b37b754cd931ed3555c20e06dd"
     },
     "site/activities/skill-audit/cases/C15.json": {
-      "size": 569278,
-      "sha256": "d2fbc4bd1e748b1ac7bc1a0c53f6208c5c51c0e9e078d8c4bc2091e1cae0a1c5"
+      "size": 583640,
+      "sha256": "293acc599ee8c9a56b460a9b17a9dd15863d6c41a03ebc148c6b58b6eeb1af56"
     },
     "site/activities/skill-audit/cases/C16.json": {
-      "size": 102653,
-      "sha256": "ae08a94d557a0a215806b2c3cfe3286bbf5ea26827854bb7cb6e12cd0d256725"
+      "size": 111353,
+      "sha256": "fe78d4e9363e582601036c18651cc1b6fabf8d57bd7f132a38275723fba97000"
     },
     "site/activities/skill-audit/cases/C17.json": {
-      "size": 203323,
-      "sha256": "192de186406451dc9174ce59a6454a8456c54d16b3f19516e7e5db7f32e71146"
+      "size": 213980,
+      "sha256": "87b19175f4daa6c2695aa0539a3dc9ff532bcff6e084f1d3eafb1d72c51f1374"
     },
     "site/activities/skill-audit/cases/C18.json": {
-      "size": 278584,
-      "sha256": "32489c7b2d178601da98d762a54b5d4f1109cd6295591cf94ed789e4ab50c307"
+      "size": 291110,
+      "sha256": "3dee7dee73abf7004eadc699052a022fd29ae49a68f45d5f20ebbafaba36b69a"
     },
     "site/activities/skill-audit/cases/C19.json": {
-      "size": 263083,
-      "sha256": "1abc089f079f7aeec306b2af8a54a7af8fccd1fd40887ee95cdd54096df366fc"
+      "size": 275509,
+      "sha256": "c0d7aee41922da8cfeb11499899e9e7d6b2872685c5da666c568c419276d0245"
     },
     "site/activities/skill-audit/cases/C20.json": {
-      "size": 265312,
-      "sha256": "f9974f2f4ca1421e11dc855e3d5560d437afc2601952d9490e86c031477ff3fa"
+      "size": 287678,
+      "sha256": "a9e6c96adc97725e36d752fc4035f37dc579dfe1d20f2327d0d313b6611f4668"
     },
     "site/activities/skill-audit/cases/C21.json": {
-      "size": 564208,
-      "sha256": "692378cd447666bb0883452a3ce955614bc5da2f308a4a0838d7e4e0ed8c4ded"
+      "size": 589009,
+      "sha256": "5cb9a0c89c287288bcca74d38bcd005244ab8259b75cde990dd1e7caa88cfa10"
     },
     "site/activities/skill-audit/cases/C22.json": {
-      "size": 264411,
-      "sha256": "845cb50d398a2a0d89909be3b72d77e5e92a372565ec54bd19301fffb99935f7"
+      "size": 277033,
+      "sha256": "751051084d82693c9401155a6d7568e7aa75faba8b04cd40af75c812b6b774be"
     },
     "site/activities/skill-audit/cases/C23.json": {
-      "size": 277967,
-      "sha256": "3f6a14a69dae667fd8733777d208df14b07193bc9bef021a1d3ab1deb032940f"
+      "size": 280999,
+      "sha256": "74c055a4b6eab8e2b15a2bee1246281f87e0c27a00e7edc2c9be9fa4f7f4d499"
     },
     "site/activities/skill-audit/cases/C24.json": {
-      "size": 341795,
-      "sha256": "8cd836d1a4fc2a4df37d89e6b3c21277f5fa59fbbfedc186e264d0d4fe3d14b7"
+      "size": 348778,
+      "sha256": "8d5106d2296fe43c7b56dab11699efd76142bb02c3018e1e07dd7172b99a0c1d"
     },
     "site/activities/skill-audit/cases/C25.json": {
-      "size": 219704,
-      "sha256": "556d8d837054f7d10ae70b387f1aa0969f5fc99d8c7b3a845f5bc4c652999309"
+      "size": 233561,
+      "sha256": "a8999fb073d7e12317e67561a8f1ce4a364b17eec062b3fefcf2d9289a38378b"
     },
     "site/activities/skill-audit/cases/C26.json": {
-      "size": 265343,
-      "sha256": "2ea23231f1d0ee1e8a7999cc18e84ff986258352248f823f0aeaa561a37c40fb"
+      "size": 277969,
+      "sha256": "3ecef84793f584c52b8cadcf81b3386b28bcaa26c70ecc1790914e3b2979eb6e"
     },
     "site/activities/skill-audit/cases/C27.json": {
-      "size": 264574,
-      "sha256": "561a8096eb6d1bcd907b9f1f22fa84068f9d55b2b7760735c1fd72219ee27838"
+      "size": 276961,
+      "sha256": "3d7c84c6d7aa0fae78fc76b2d10f14206ec5d06e4727233e2a441ed1f81e60d6"
     },
     "site/activities/skill-audit/cases/C28.json": {
-      "size": 987914,
-      "sha256": "7214758194fdd4d4142da65ba853802697e4807bee1f528a38d1771f15272a26"
+      "size": 1056247,
+      "sha256": "6f9e35a5c4632feb24cda68b560e53081790ef4e86af9ec0204f70287b627712"
     },
     "site/activities/skill-audit/cases/C29.json": {
-      "size": 264873,
-      "sha256": "7e7bd32679f6a52d6d5043423832c88956a331408b0da97fe3c7c72f09eb63e0"
+      "size": 277475,
+      "sha256": "87b4537db36b123368dba1f2df3ac70370490b826484ec28f1352f89e6f616b6"
     },
     "site/activities/skill-audit/cases/C30.json": {
-      "size": 546699,
-      "sha256": "9d04b587d761c5766b06e20689f5d1280ec5e4ec3f8b07b5f1a3f9edd4dba5ad"
+      "size": 562458,
+      "sha256": "83010ec7f9824ed068a5076c7dcd042bc8d09a6439b53e1575539ca883c81c4c"
     },
     "site/activities/skill-audit/cases/C31.json": {
-      "size": 264478,
-      "sha256": "e7d9069bf1bbbb6313a441c7704ca136383c4012766e6374340a7219a8182089"
+      "size": 276816,
+      "sha256": "b2d76fa2dee9249d05a964e5e6e2388da6bb3f1e324b207134d893eb5e88acba"
     },
     "site/activities/skill-audit/cases/C32.json": {
-      "size": 432560,
-      "sha256": "71afa722e6aad2cd655c07793ed7b5455ca4ce8d629356520c7aa98f8c52c5b9"
+      "size": 440464,
+      "sha256": "be77c53d094c7831f55af19bd412c1e99379fc5be79d15ad2f075857d0e42a44"
     },
     "site/activities/skill-audit/cases/C33.json": {
-      "size": 509028,
-      "sha256": "f67e39f5722f181de0f208c2fe03353c8a9ac82c72e03feffe4121052b3fe13e"
+      "size": 524584,
+      "sha256": "c0169b26cb506f95ffdf9b5d515d1ea1c32e7540afc311bd8d255f1dbc987172"
     },
     "site/activities/skill-audit/cases/C34.json": {
-      "size": 262916,
-      "sha256": "521591f4931bb1601ce0c248975fc0bf468563b62d5c50262fdd6a52fc80463b"
+      "size": 275559,
+      "sha256": "0b4fafa4f6d51b3f5124d37bacf3acbfe1ed0f148cb1aca5e830f6cdfd767782"
     },
     "site/activities/skill-audit/cases/C35.json": {
-      "size": 262699,
-      "sha256": "3a357ea1b54ba69114e007e4890a135151f3595fa97a0b0716561b9084233c33"
+      "size": 275911,
+      "sha256": "05bad82484ffb867bd06aa80702004d1195d8ebdb786d230aae94a31272bad7e"
     },
     "site/activities/skill-audit/cases/C36.json": {
-      "size": 609146,
-      "sha256": "3d90958dc3f33763c0941afaa155ad726be9d226b3ddb57fb1cd679d4300cf18"
+      "size": 623472,
+      "sha256": "4a2ba953b0cb03b1634ef43a290b2fe628aa86bc9ce2db166cfc845bab8c32f8"
     },
     "site/activities/skill-audit/cases/C37.json": {
-      "size": 535966,
-      "sha256": "63f7fa4a22ace3e503766ee6147e424e6a475adf9818ece15d33a613927b86cb"
+      "size": 549800,
+      "sha256": "1b9cc7819431617e1b99e6be6bf97ca6b511cb4f8a251c910fe5008f86be6349"
     },
     "site/activities/skill-audit/cases/C38.json": {
-      "size": 350337,
-      "sha256": "1d956fff77b4c01dcef21a94bd780c5d9eccbe2bea71b20ae1bbef044e502640"
+      "size": 364277,
+      "sha256": "63d27211d94506f155a128256bcf7869438dcbe5e4a9a8c61c7efbfd25ee2fc2"
     },
     "site/activities/skill-audit/cases/C39.json": {
-      "size": 633521,
-      "sha256": "df9ff1ccd54301cb252b48dd9eb2d14aa5fc1ef211236c2e942b784e9b1ad860"
+      "size": 647098,
+      "sha256": "f434245f03dab20437f6d0765db440cddf0d97b45088c42483d70c1288521c24"
     },
     "site/activities/skill-audit/cases/C40.json": {
-      "size": 363254,
-      "sha256": "b26124c302adca0c2e17a239e9b18077b2309b7f5fd070be1dc5379fcead9193"
+      "size": 375632,
+      "sha256": "2f57982e125bb8e4de57a7697bb78cbe869b60ab7a9f7dd3f48d658e2153fe2b"
     },
     "site/activities/skill-audit/cases/C41.json": {
-      "size": 362461,
-      "sha256": "ae1c50dba213ab7106a7e82248deb3975a9d674778c0b1aa65157706bc8db922"
+      "size": 374753,
+      "sha256": "c718a93b838dcf009d8dbe34735c95e8e4e7fc91102383a9fcd9497a3afbd1d5"
     },
     "site/activities/skill-audit/cases/C42.json": {
-      "size": 571430,
-      "sha256": "2d5c651fec842eb3b9acb3034ce6ad34846217ba1bb8e26ed9caf0871d24ad69"
+      "size": 585815,
+      "sha256": "d6aff0e462dfda27bc31690b6039f28abeca60aecfc15ee5d9d49260fdcb8c31"
     },
     "site/activities/skill-audit/cases/C43.json": {
-      "size": 623411,
-      "sha256": "330166cb6984d17ba737a27bc042724eab10a071d9b30f0ff6b7ca26c3c57e0a"
+      "size": 643562,
+      "sha256": "99c6f2353778996d2b357a567444d233c905644434bf63694df6135f1458a6d3"
     },
     "site/activities/skill-audit/cases/index.json": {
-      "size": 57241,
-      "sha256": "050995387b981536155af436b7d08cece161928b5f98cb3256bf81e5503fb433"
+      "size": 81115,
+      "sha256": "e143e7eb748fe3b9eeb948112ab52c61ae9c785bf2bc405373c47d4199e4d0af"
+    },
+    "site/activities/skill-audit/trace-atlas.js": {
+      "size": 13504,
+      "sha256": "3595fe4fce7f26aa1b936bd5458a601ea2f253157a9e6fa2de229fd870dc5067"
+    },
+    "site/activities/skill-audit/trace-atlas.css": {
+      "size": 6368,
+      "sha256": "6cbf518b8c21c38922385199adbb20f21eb21b2d036cb6c5a9c37d1bc75d82ba"
+    },
+    "site/activities/skill-audit/cases/C01.atlas.json": {
+      "size": 5784250,
+      "sha256": "19672b1d1905ff8dd0874b0a3bc46e4f034e1a09e00df2c008ff75e57f14940a"
+    },
+    "site/activities/skill-audit/cases/C02.atlas.json": {
+      "size": 4747064,
+      "sha256": "d41a007e50ba121b3fd8ace8850a96132bc098140ff77f12b8104964dfe25285"
+    },
+    "site/activities/skill-audit/cases/C03.atlas.json": {
+      "size": 7587466,
+      "sha256": "5e2767d97b4146c122c937c16ffcaab047c8b628efe29bd4069084eb1b9a78bc"
+    },
+    "site/activities/skill-audit/cases/C04.atlas.json": {
+      "size": 5928653,
+      "sha256": "d6de3d0c3d3d6741fece66d456a75a18c06d1181f073d38021dd185292c41573"
+    },
+    "site/activities/skill-audit/cases/C05.atlas.json": {
+      "size": 6432908,
+      "sha256": "ae9d7979703d91352ceae728077d3a539131e6ccd733036684363975be1d2662"
+    },
+    "site/activities/skill-audit/cases/C06.atlas.json": {
+      "size": 5654226,
+      "sha256": "abc06bcf2804c1bce361e9f68fc15d6cd84572690f6b6979176706dca55b7bc0"
+    },
+    "site/activities/skill-audit/cases/C07.atlas.json": {
+      "size": 4602663,
+      "sha256": "14bd04ccc6b0bdd274845cd201f9923099baf90b1fd8b0b94fc966fc7d44860e"
+    },
+    "site/activities/skill-audit/cases/C08.atlas.json": {
+      "size": 5912630,
+      "sha256": "be02577574c933b621058fe0141d1c827bd7eed3e49e8da860945bd420994919"
+    },
+    "site/activities/skill-audit/cases/C09.atlas.json": {
+      "size": 6262830,
+      "sha256": "eb6f0ba41bac9f8c52bc18836be220839554bac4d969e47b0812b786190c933b"
+    },
+    "site/activities/skill-audit/cases/C10.atlas.json": {
+      "size": 5980687,
+      "sha256": "f5720ac3cd55342c76a4cda01d0174d3278e19ad34b7713b350446770cdc3083"
+    },
+    "site/activities/skill-audit/cases/C11.atlas.json": {
+      "size": 5735208,
+      "sha256": "b90b5d4db120407744b9e7901f07baf36d1ebf3a0905fbabde553ab201ecbf0d"
+    },
+    "site/activities/skill-audit/cases/C12.atlas.json": {
+      "size": 6830997,
+      "sha256": "47dcd0fe4649f2dc0c6e3701374e3877bfdd09ce6dec781d778091b8d3afd6f6"
+    },
+    "site/activities/skill-audit/cases/C13.atlas.json": {
+      "size": 4912666,
+      "sha256": "af37bb5d533f82091eacab050ee4adf5c443dd914a49020848a462b8efc1d62f"
+    },
+    "site/activities/skill-audit/cases/C14.atlas.json": {
+      "size": 5436115,
+      "sha256": "23e68357947343a1cf797cfcdc217f00da8a4037ba457c8beb9cbd2a21ffb409"
+    },
+    "site/activities/skill-audit/cases/C15.atlas.json": {
+      "size": 6411027,
+      "sha256": "8ae686c3e949246485b9c36278b7c0e29f612963deea8b665e9b14efca09eb8d"
+    },
+    "site/activities/skill-audit/cases/C16.atlas.json": {
+      "size": 2369910,
+      "sha256": "e49286061f8469a1332b8ce6ce44f695e1dbe37c460bbe39921434e8081d6f82"
+    },
+    "site/activities/skill-audit/cases/C17.atlas.json": {
+      "size": 5596030,
+      "sha256": "788cced481b78678d2f01d54df02f2b8faf12d8e676a10c993cfa8c49b1f4eba"
+    },
+    "site/activities/skill-audit/cases/C18.atlas.json": {
+      "size": 4984272,
+      "sha256": "52b025f5827039ccf29d4bc064ad46d556c5903b6c21f3f40570c9dd089961a1"
+    },
+    "site/activities/skill-audit/cases/C19.atlas.json": {
+      "size": 3602785,
+      "sha256": "2e030cffdc293a3d4ddbc05662d6ddb04dcbed7eca7d073e2ccdaf51249ad4fc"
+    },
+    "site/activities/skill-audit/cases/C20.atlas.json": {
+      "size": 4311123,
+      "sha256": "da32c6af4d422fcc87868b3806a188d3d3d3a960618eaf7f4d7d4a2d49cd88c0"
+    },
+    "site/activities/skill-audit/cases/C21.atlas.json": {
+      "size": 7252041,
+      "sha256": "2514ffbd5782d4acfae5c5d32e13d29ae1f3ebc9145547bea683174e004208f2"
+    },
+    "site/activities/skill-audit/cases/C22.atlas.json": {
+      "size": 3624653,
+      "sha256": "c87eb3b427ccfdce12fb22ff43a981e3f034693b5ab585bd3901870de0e77f8f"
+    },
+    "site/activities/skill-audit/cases/C23.atlas.json": {
+      "size": 5929917,
+      "sha256": "c30d39a3b35604e3530f2f9fbce3d83bb878814138887da3fbd0cf00037acb38"
+    },
+    "site/activities/skill-audit/cases/C24.atlas.json": {
+      "size": 6505281,
+      "sha256": "3e81acfb33d5b90356e44b4c0ca218ceddc3e903104b09f09e11e88716366ad2"
+    },
+    "site/activities/skill-audit/cases/C25.atlas.json": {
+      "size": 4209591,
+      "sha256": "cd443c1d6b06699efd864f858f70041cb31c75be4e91bea1fb0e979b06912ff1"
+    },
+    "site/activities/skill-audit/cases/C26.atlas.json": {
+      "size": 3614916,
+      "sha256": "4d8cdd860350c96bf752991c4bc830899d92ab6ec81a1241ef05329a316e59e7"
+    },
+    "site/activities/skill-audit/cases/C27.atlas.json": {
+      "size": 3582682,
+      "sha256": "833d3f98e3e8dec3818e1e558947adf0fe659ac07d9e8df49449a098cf6710be"
+    },
+    "site/activities/skill-audit/cases/C28.atlas.json": {
+      "size": 10423490,
+      "sha256": "9382cd25f662c4f70ca7b22d4040f3c222b34bbee14082334ddd3fadab245628"
+    },
+    "site/activities/skill-audit/cases/C29.atlas.json": {
+      "size": 3651734,
+      "sha256": "917dd9fd9d5a5c566814902429b0b3316016a3f75cb98f8f13cb7c0c08fb920d"
+    },
+    "site/activities/skill-audit/cases/C30.atlas.json": {
+      "size": 6570574,
+      "sha256": "4b2fde4990f25c87995a4fc0a59d319b1024655fa3ebbc98ed077fa8869fdadf"
+    },
+    "site/activities/skill-audit/cases/C31.atlas.json": {
+      "size": 3555247,
+      "sha256": "f66cddb5e043da2997b60804518ab04f4a461b5efc63e1e85b535bb7b50bc468"
+    },
+    "site/activities/skill-audit/cases/C32.atlas.json": {
+      "size": 4110513,
+      "sha256": "22b6ed16ff7a4d7817c831eb23cee566ec54db4e5a56f02493d05080e882468e"
+    },
+    "site/activities/skill-audit/cases/C33.atlas.json": {
+      "size": 4693841,
+      "sha256": "8ac142b379f8d9953d8f8243d5b8515fb29e37dca93f1b42295f67770d18c41a"
+    },
+    "site/activities/skill-audit/cases/C34.atlas.json": {
+      "size": 3590379,
+      "sha256": "41a7bbcf369ce3b0d7bdc17a2f951b6b079dda1c7d6cacf9cdb34aa0c9b539ac"
+    },
+    "site/activities/skill-audit/cases/C35.atlas.json": {
+      "size": 3451302,
+      "sha256": "8c33f1866793af2bf6791b0bdbb44b25e59d1dc82e426af029799257be43a54e"
+    },
+    "site/activities/skill-audit/cases/C36.atlas.json": {
+      "size": 6590430,
+      "sha256": "74e9ec721727287f68e7a289aa7c3c6deff43f1e29e2b3cb56389718d682606f"
+    },
+    "site/activities/skill-audit/cases/C37.atlas.json": {
+      "size": 6227507,
+      "sha256": "dc0daceb9ec96383be6e04e7aa260ddc7cbc1daaf2cce43e17ca73880d7f3eef"
+    },
+    "site/activities/skill-audit/cases/C38.atlas.json": {
+      "size": 4624368,
+      "sha256": "73445bf8bd6f8969485eec79d0fa92545a507c092db0208ccb7e24410268b712"
+    },
+    "site/activities/skill-audit/cases/C39.atlas.json": {
+      "size": 7017673,
+      "sha256": "253658cdabe30278d37a3ebe1a3e12e3ab793ba9f7ef5e4919bbcc3ad3c0c29a"
+    },
+    "site/activities/skill-audit/cases/C40.atlas.json": {
+      "size": 5083897,
+      "sha256": "bb4a1f7708b8f98ddf144bb67a20e1c7955a51dda334e612fd6939267a9c69fa"
+    },
+    "site/activities/skill-audit/cases/C41.atlas.json": {
+      "size": 5119635,
+      "sha256": "6a0c19579a6b3659aa5a48b00b41405565f819602327475e7030e638295b39ac"
+    },
+    "site/activities/skill-audit/cases/C42.atlas.json": {
+      "size": 6528306,
+      "sha256": "a62418eeaf0d797b2f040ea4e75f33930dd872e7668619d37d39659c44981184"
+    },
+    "site/activities/skill-audit/cases/C43.atlas.json": {
+      "size": 6942556,
+      "sha256": "3b42686ae84ac203bbf8c5da8f88f74f675d6dd60982f801f9dea075e55e27b3"
     }
   }
 };
