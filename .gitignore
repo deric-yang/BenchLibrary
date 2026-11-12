@@ -20,3 +20,6 @@ credentials.json
 *.secrets
 *.token
 .kwbl-upload-key
+
+# Published case payloads stay on Devbox/R2, never in Git.
+/site/activities/skill-audit/cases/
